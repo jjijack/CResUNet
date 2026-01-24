@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv
+venv/
+conda-env/
+.envs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# PyTorch / ML
+*.pt
+*.pth
+*.ckpt
+
+# Logs & cache
+logs/
+wandb/
+runs/
