@@ -3,6 +3,7 @@ from torch.utils.data import DataLoader, random_split
 from dataset import NCCorrectionDataset  # 导入新写的 Dataset
 from models.baseline.CResU_Net import CRUNet
 from config import experiment_params, model_params
+from visualize import visualize_prediction
 
 def masked_mse_loss(pred, target, mask):
     """
@@ -77,6 +78,8 @@ def run():
         
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch {epoch+1}, MSE Loss: {avg_loss:.4f}")
+
+        visualize_prediction(model, val_loader, device)
 
 if __name__ == '__main__':
     run()
