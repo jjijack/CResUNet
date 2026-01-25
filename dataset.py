@@ -4,86 +4,86 @@ from torch.utils.data import Dataset
 from netCDF4 import Dataset as NCDataset
 
 class NCCorrectionDataset(Dataset):
-    def __init__(self, forecast_path, reanalysis_path, max_step=120):
+    def __init__(self, forecast_path, reanalysis_path):
         self.forecast_path = forecast_path
         self.reanalysis_path = reanalysis_path
-        self.max_step = max_step
         
-        # 1. 扫描所有 Runs，不再剔除，而是记录每个 Run 的有效时长
-        self.run_info = self._scan_runs()
-        print(f"总样本数: {len(self.run_info)}")
+        print("正在初始化数据集索引 ...")
+        
+        # --- 1. 预读取轻量级元数据 ---
+        with NCDataset(self.forecast_path, 'r') as fc_ds:
+            self.total_runs = fc_ds.dimensions['run'].size
+            # 仅读取时间，不读 SST
+            self.fc_times = fc_ds.variables['valid_time'][:] 
+            
+            # 【优化】Land Mask 很小，直接读进内存，避免每次反复读硬盘
+            # 假设 land_mask 形状是 [lat, lon]，读进来扩展为 [1, H, W]
+            raw_mask = fc_ds.variables['land_mask'][:]
+            self.land_mask_cache = np.nan_to_num(raw_mask, nan=0.0)[np.newaxis, :, :]
 
-    def _scan_runs(self):
-        run_info = []
-        with NCDataset(self.forecast_path, 'r') as fc_ds, \
-             NCDataset(self.reanalysis_path, 'r') as ra_ds:
-            
-            total_runs = fc_ds.dimensions['run'].size
-            fc_valid_times = fc_ds.variables['valid_time'][:] 
+        with NCDataset(self.reanalysis_path, 'r') as ra_ds:
             ra_times = ra_ds.variables['time'][:]
+            # 建立时间映射表
+            self.ra_time_map = {round(t, 2): i for i, t in enumerate(ra_times)}
             
-            # 建立真值时间索引
-            ra_time_map = {round(t, 2): i for i, t in enumerate(ra_times)}
+        # --- 2. 扫描有效 Run ---
+        self.run_info = []
+        for run_idx in range(self.total_runs):
+            steps_times = self.fc_times[run_idx]
+            valid_indices = []
+            valid_steps_count = 0
             
-            for run_idx in range(total_runs):
-                steps_times = fc_valid_times[run_idx]
-                
-                # 找出哪些 step 有对应的真值
-                valid_indices = [] # 记录真值文件里的索引
-                valid_steps_count = 0
-                
-                for t in steps_times:
-                    t_round = round(t, 2)
-                    if t_round in ra_time_map:
-                        valid_indices.append(ra_time_map[t_round])
-                        valid_steps_count += 1
-                    else:
-                        # 一旦超出真值范围，后面通常也都没有了
-                        break 
-                
-                # 只要至少有1个小时是重合的，就算有效样本
-                if valid_steps_count > 0:
-                    run_info.append({
-                        "run_idx": run_idx,
-                        "ra_indices": valid_indices,
-                        "valid_len": valid_steps_count
-                    })
-                    
-        return run_info
+            for t in steps_times:
+                t_round = round(t, 2)
+                if t_round in self.ra_time_map:
+                    valid_indices.append(self.ra_time_map[t_round])
+                    valid_steps_count += 1
+                else:
+                    break # 假设时间是连续的，断了就停
+            
+            if valid_steps_count > 0:
+                self.run_info.append({
+                    "run_idx": run_idx,
+                    "ra_indices": valid_indices, # 存的是索引列表
+                    "valid_len": valid_steps_count
+                })
+        print(f"索引构建完成！有效样本: {len(self.run_info)}")
 
     def __len__(self):
         return len(self.run_info)
 
     def __getitem__(self, idx):
+        # 获取索引信息
         info = self.run_info[idx]
         run_idx = info['run_idx']
         ra_indices = info['ra_indices']
         valid_len = info['valid_len']
         
-        with NCDataset(self.forecast_path, 'r') as fc_ds, \
-             NCDataset(self.reanalysis_path, 'r') as ra_ds:
+        # 1. 读取 Forecast SST
+        with NCDataset(self.forecast_path, 'r') as fc_ds:
+            sst_raw = fc_ds.variables['sst'][run_idx] 
+            sst_input = np.nan_to_num(sst_raw, nan=0.0)
             
-            # 1. 读取完整预报 (Input)
-            # 形状 [120, H, W]
-            x_raw = fc_ds.variables['sst'][run_idx, :, :, :]
+        # 2. 拼接 Land Mask
+        x_combined = np.concatenate((sst_input, self.land_mask_cache), axis=0)
+        
+        # 3. 读取 Reanalysis (Target)
+        y_full = np.zeros_like(sst_input)
+        
+        # --- 【核心修改】构造复合 Mask (时间 + 空间) ---
+        # 初始化 Mask：全 0
+        combined_mask = np.zeros_like(sst_input)
+        
+        if valid_len > 0:
+            with NCDataset(self.reanalysis_path, 'r') as ra_ds:
+                y_partial = ra_ds.variables['sst'][ra_indices]
+                y_partial = np.nan_to_num(y_partial, nan=0.0)
+                
+            y_full[:valid_len] = y_partial
             
-            # 2. 读取部分真值 (Target)
-            # 形状 [valid_len, H, W]
-            y_partial = ra_ds.variables['sst'][ra_indices, :, :]
-            
-            # 3. 构造 Padding 后的真值和 Mask
-            # 初始化全0矩阵 [120, H, W]
-            y_full = np.zeros_like(x_raw)
-            mask = np.zeros_like(x_raw)
-            
-            # 填入有效部分
-            y_full[:valid_len, :, :] = y_partial
-            mask[:valid_len, :, :] = 1.0  # 有效部分设为 1
-            
-            # 处理 NaN
-            x_data = np.nan_to_num(x_raw, nan=0.0)
-            y_data = np.nan_to_num(y_full, nan=0.0)
-            
-            return (torch.from_numpy(x_data).float(), 
-                    torch.from_numpy(y_data).float(), 
-                    torch.from_numpy(mask).float())
+            # 只有在 (有效时间) AND (是海洋) 的地方，Mask 才为 1
+            # 利用广播机制：time_mask (前N层为1) * ocean_mask (空间为1)
+            combined_mask[:valid_len] = self.land_mask_cache
+        return (torch.from_numpy(x_combined).float(), 
+                torch.from_numpy(y_full).float(), 
+                torch.from_numpy(combined_mask).float()) # 返回复合 Mask

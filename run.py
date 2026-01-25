@@ -4,6 +4,8 @@ from dataset import NCCorrectionDataset  # 导入新写的 Dataset
 from models.baseline.CResU_Net import CRUNet
 from config import experiment_params, model_params
 from visualize import visualize_prediction
+import os
+import shutil
 
 def masked_mse_loss(pred, target, mask):
     """
@@ -18,7 +20,22 @@ def masked_mse_loss(pred, target, mask):
     loss = valid_diff.sum() / (mask.sum() + 1e-6)
     return loss
 
+def clear_output_dir(save_dir='./results'):
+    """
+    程序启动时清空输出目录，防止旧图片堆积
+    """
+    if os.path.exists(save_dir):
+        # 递归删除整个文件夹
+        shutil.rmtree(save_dir)
+        print(f"已清空旧输出目录: {save_dir}")
+    
+    # 重新创建空文件夹
+    os.makedirs(save_dir)
+
 def run():
+    # 0. 清空输出目录
+    clear_output_dir()
+    
     # 1. 配置路径
     fc_path = './data/forecast_structured.nc'
     ra_path = './data/reanalysis_structured.nc'
@@ -41,8 +58,8 @@ def run():
 
     # 4. DataLoader
     batch_size = model_params['CResU_Net']['batch_gen']['batch_size']
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True, persistent_workers=True)
 
     # 5. 模型初始化
     device = experiment_params['device']
@@ -79,7 +96,7 @@ def run():
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch {epoch+1}, MSE Loss: {avg_loss:.4f}")
 
-        visualize_prediction(model, val_loader, device)
+        visualize_prediction(model, val_loader, device, epoch+1)
 
 if __name__ == '__main__':
     run()

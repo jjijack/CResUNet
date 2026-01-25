@@ -53,7 +53,7 @@ model_params = {
         },
         "core": {
             "selected_dim": 0,
-            "in_channels": 120,
+            "in_channels": 121,
             "out_channels": 120
         }
     },

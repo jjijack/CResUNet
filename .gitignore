@@ -22,3 +22,12 @@ conda-env/
 logs/
 wandb/
 runs/
+
+# Data files
+data/
+*.nc
+results/
+*.npy
+*.jpg
+*.png
+*.csv
