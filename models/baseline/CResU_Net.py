@@ -285,7 +285,8 @@ class CRUNet(nn.Module):
 
     def forward(self, x, **kwargs):
 
-        x = x[:, :, self.selected_dim]
+        # 直接使用完整的输入 x，因为 run.py 里已经配置好了 in_channels=120
+        # x = x[:, :, self.selected_dim]
 
         x1 = self.inc(x)
         x2 = self.res1(x1)
@@ -311,7 +312,8 @@ class CRUNet(nn.Module):
         x17 = self.res8(x16)
         out = self.out(x17)
 
-        output = out.unsqueeze(2)
+        # output = out.unsqueeze(2)
+        output = out
 
         return output
 

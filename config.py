@@ -38,7 +38,7 @@ model_params = {
             "output_dim": 0,
             "window_in_len": 10,
             "window_out_len": 10,
-            "batch_size": 1,
+            "batch_size": 2,
             "shuffle": True,
             "seed": 1
         },
@@ -53,8 +53,8 @@ model_params = {
         },
         "core": {
             "selected_dim": 0,
-            "in_channels": 10,
-            "out_channels": 10
+            "in_channels": 120,
+            "out_channels": 120
         }
     },
 }
