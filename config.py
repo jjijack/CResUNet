@@ -1,60 +1,72 @@
-
 experiment_params = {
-    "normalize_flag": True,
+    "normalize_flag": True,       # 是否进行数据归一化 (建议开启)
     "model": "CResU_Net",
     "device": 'cuda',
-    "operation_mode": "train_mode"
+    "operation_mode": "train_mode",
+    "save_dir": './results',      # 结果保存路径
+    "model_save_name": 'best_model.pth' # 最佳模型文件名
 }
 
 data_params = {
-    "weather_raw_dir": 'F:\\OSTIA',
-    "area_name": "NSCS",
-    "spatial_range": [[17, 22], [113, 120]],  # NSCS [17, 22], [113, 120], WSCS[8, 18], [109, 113], ESCS[12, 16],[115, 120]
-    "weather_freq": 1,
-    "downsample_mode": "selective",  # can be average or selective
-    "check_files": False,
-    "features": ['analysed_sst'],
-    "target_dim": 0,
-    "rebuild": False,
+    # 替换为你的 .nc 文件路径
+    "forecast_path": './data/forecast_structured.nc',
+    "reanalysis_path": './data/reanalysis_structured.nc',
+    
+    # 数据集切分参数 (替代原本的日期切分)
+    "split": {
+        "train_run_count": 24, # 前24个Run用于训练
+        "val_run_count": 7     # 后7个Run用于验证
+    },
 
-    "train_period": {
-            "start": "1995-01-01",
-            "end": "2010-12-31"
-    },
-    "val_period": {
-            "start": "2011-01-01",
-            "end": "2012-12-31"
-    },
-    "test_period": {
-            "start": "2013-01-01",
-            "end": "2013-12-31"
-    }
+    "num_workers": 4,          # DataLoader 线程数
+    "check_files": False,      # 是否检查文件完整性
+    
+    # --- 以下参数在当前 .nc 模式下可能暂时用不到，但保留以防万一 ---
+    "weather_raw_dir": 'F:\\OSTIA', 
+    "area_name": "NSCS",
+    "spatial_range": [[17, 22], [113, 120]], 
+    "downsample_mode": "selective",
+    "features": ['analysed_sst'],
 }
 
 model_params = {
     "CResU_Net": {
         "batch_gen": {
-            "input_dim": 0,
-            "output_dim": 0,
-            "window_in_len": 10,
-            "window_out_len": 10,
-            "batch_size": 2,
+            "batch_size": 2,      # 显存允许的话可以设为 4 或 8
             "shuffle": True,
-            "seed": 1
+            "seed": 42            # 固定随机种子
         },
         "trainer": {
-            "num_epochs": 1,
-            "momentum": 0.7,
+            "num_epochs": 500,
+            "learning_rate": 1e-3,
+            "weight_decay": 1e-4,       # 稍微减小正则化力度
             "optimizer": "adam",
-            "weight_decay": 0.0002,
-            "learning_rate": 0.0001,
-            "clip": 5,
-            "early_stop_tolerance": 8
+            
+            # --- 学习率调度器 (ReduceLROnPlateau) ---
+            "lr_scheduler": {
+                "mode": 'min',
+                "factor": 0.5,         # 每次衰减一半
+                "patience": 5,         # 忍受5轮不下降
+            },
+            
+            # --- 早停机制 ---
+            "early_stopping": {
+                "tolerance": 15,       # 忍受15轮 (原 early_stop_tolerance)
+                "delta": 1e-6          # 最小下降幅度
+            },
+
+            # --- 时间加权 Loss ---
+            "loss_weights": {
+                "enabled": True,       # 是否开启加权
+                "start_weight": 1.0,   # T=0 的权重
+                "end_weight": 10.0,    # T=119 的权重
+                "tv_weight": 0.01,     # 平滑约束(TV Loss)权重，建议 0.005 ~ 0.02
+                "l1_weight": 0.1       # 稀疏性惩罚，保护 0 偏差区域
+            }
         },
         "core": {
-            "selected_dim": 0,
-            "in_channels": 121,
-            "out_channels": 120
+            "in_channels": 121,        # 120 SST + 1 Mask
+            "out_channels": 120,       # 输出必须是 120 (预测每个时间步的 Bias)
         }
     },
 }
