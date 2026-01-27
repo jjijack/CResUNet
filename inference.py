@@ -1,0 +1,179 @@
+import numpy as np
+import torch
+from netCDF4 import Dataset as NCDataset
+import matplotlib.pyplot as plt
+from matplotlib.colors import TwoSlopeNorm
+
+from config import experiment_params, model_params
+from models.baseline.CResU_Net import CRUNet
+
+
+def _build_model(device):
+    model_cfg = model_params['CResU_Net']
+    model = CRUNet(
+        in_channels=model_cfg['core']['in_channels'],
+        out_channels=model_cfg['core']['out_channels'],
+        selected_dim=0,
+        device=device
+    ).to(device)
+    return model
+
+
+def _load_land_mask(forecast_path):
+    with NCDataset(forecast_path, 'r') as ds:
+        raw_mask = ds.variables['land_mask'][:]
+    return np.nan_to_num(raw_mask, nan=0.0)[np.newaxis, :, :]
+
+
+def correct_run_from_nc(model_path, forecast_path, run_idx=0, device=None):
+    """
+    读取某一天的 120 小时预报，输出订正后的 120 小时结果。
+    返回: corrected_sst, pred_bias
+    """
+    if device is None:
+        device = torch.device(experiment_params['device'] if torch.cuda.is_available() else 'cpu')
+    elif not isinstance(device, torch.device):
+        device = torch.device(device)
+
+    model = _build_model(device)
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    model.eval()
+
+    land_mask = _load_land_mask(forecast_path)
+    with NCDataset(forecast_path, 'r') as ds:
+        sst_raw = ds.variables['sst'][run_idx]
+    sst_input = np.nan_to_num(sst_raw, nan=0.0)
+
+    x = np.concatenate((sst_input, land_mask), axis=0)
+    x_tensor = torch.from_numpy(x).unsqueeze(0).float().to(device)
+
+    with torch.no_grad():
+        pred_bias = model(x_tensor)
+
+    corrected = x_tensor[0, :120] - pred_bias[0]
+    return corrected.cpu().numpy(), pred_bias[0].cpu().numpy()
+
+
+def visualize_run_step(
+    forecast_path,
+    reanalysis_path,
+    run_idx,
+    t,
+    corrected_sst,
+    pred_bias,
+    mask_land=True,
+):
+    """
+    可视化单个时间步的原始场、订正场、原始偏差与订正残差。
+    """
+    with NCDataset(forecast_path, 'r') as ds:
+        forecast = ds.variables['sst'][run_idx][t]
+        forecast = np.nan_to_num(forecast, nan=0.0)
+        land_mask = ds.variables['land_mask'][:]
+        ocean_mask = np.nan_to_num(land_mask, nan=0.0)
+        fc_time = float(np.round(ds.variables['valid_time'][run_idx][t], 2))
+
+    with NCDataset(reanalysis_path, 'r') as ds:
+        ra_times = ds.variables['time'][:]
+        ra_map = {round(float(x), 2): i for i, x in enumerate(ra_times)}
+        ra_idx = ra_map.get(fc_time)
+        if ra_idx is None:
+            raise ValueError(f"未在再分析数据中找到时间 {fc_time} 的匹配项")
+        target = ds.variables['sst'][ra_idx]
+        target = np.nan_to_num(target, nan=0.0)
+
+    corrected = corrected_sst[t].copy()
+    bias = pred_bias[t].copy()
+
+    if mask_land:
+        forecast[ocean_mask == 0] = np.nan
+        corrected[ocean_mask == 0] = np.nan
+        bias[ocean_mask == 0] = np.nan
+        target[ocean_mask == 0] = np.nan
+
+    orig_bias = forecast - target
+    res_bias = corrected - target
+
+    orig_rmse = np.sqrt(np.nanmean(orig_bias ** 2))
+    res_rmse = np.sqrt(np.nanmean(res_bias ** 2))
+
+    bias_abs_max = np.nanmax(np.abs(np.concatenate([orig_bias.ravel(), res_bias.ravel()])))
+    if bias_abs_max == 0:
+        bias_abs_max = 0.1
+    bias_norm = TwoSlopeNorm(vmin=-bias_abs_max, vcenter=0.0, vmax=bias_abs_max)
+
+    plt.figure(figsize=(12, 8))
+
+    plt.subplot(2, 2, 1)
+    plt.title("Forecast")
+    plt.imshow(forecast, origin="lower", cmap="jet")
+    plt.colorbar()
+
+    plt.subplot(2, 2, 2)
+    plt.title("Corrected")
+    plt.imshow(corrected, origin="lower", cmap="jet")
+    plt.colorbar()
+
+    plt.subplot(2, 2, 3)
+    plt.title(f"Forecast Bias\nRMSE: {orig_rmse:.4f}°C")
+    plt.imshow(orig_bias, origin="lower", cmap="seismic", norm=bias_norm)
+    plt.colorbar()
+
+    plt.subplot(2, 2, 4)
+    plt.title(f"Residual Bias\nRMSE: {res_rmse:.4f}°C")
+    plt.imshow(res_bias, origin="lower", cmap="seismic", norm=bias_norm)
+    plt.colorbar()
+
+    plt.tight_layout()
+    plt.show()
+
+
+def compute_run_rmse(
+    forecast_path,
+    reanalysis_path,
+    run_idx,
+    corrected_sst,
+):
+    """
+    统计某一天 120 小时的 RMSE，并打印原始 vs 订正对比。
+    返回: (rmse_forecast, rmse_corrected)
+    """
+    with NCDataset(forecast_path, 'r') as fc_ds:
+        fc_times = fc_ds.variables['valid_time'][run_idx]
+        fc_all = fc_ds.variables['sst'][run_idx]
+        fc_all = np.nan_to_num(fc_all, nan=0.0)
+        land_mask = fc_ds.variables['land_mask'][:]
+        ocean_mask = np.nan_to_num(land_mask, nan=0.0)
+
+    with NCDataset(reanalysis_path, 'r') as ra_ds:
+        ra_times = ra_ds.variables['time'][:]
+        ra_map = {round(float(x), 2): i for i, x in enumerate(ra_times)}
+
+        time_pairs = [(t, ra_map.get(round(float(fc_time), 2))) for t, fc_time in enumerate(fc_times)]
+        time_pairs = [(t, idx) for t, idx in time_pairs if idx is not None]
+
+        if len(time_pairs) == 0:
+            raise ValueError("没有找到可用的时间步用于 RMSE 统计")
+
+        t_indices = [t for t, _ in time_pairs]
+        ra_indices = [idx for _, idx in time_pairs]
+
+        target_all = ra_ds.variables['sst'][ra_indices]
+        target_all = np.nan_to_num(target_all, nan=0.0)
+
+    fc_sel = fc_all[t_indices]
+    corr_sel = corrected_sst[t_indices]
+
+    fc_sel = fc_sel.copy()
+    corr_sel = corr_sel.copy()
+    target_all = target_all.copy()
+
+    fc_sel[:, ocean_mask == 0] = np.nan
+    corr_sel[:, ocean_mask == 0] = np.nan
+    target_all[:, ocean_mask == 0] = np.nan
+
+    rmse_forecast = np.sqrt(np.nanmean((fc_sel - target_all) ** 2))
+    rmse_corrected = np.sqrt(np.nanmean((corr_sel - target_all) ** 2))
+    print(f"RMSE (Forecast): {rmse_forecast:.5f}°C")
+    print(f"RMSE (Corrected): {rmse_corrected:.5f}°C")
+    return rmse_forecast, rmse_corrected
