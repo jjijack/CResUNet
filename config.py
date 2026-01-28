@@ -66,6 +66,8 @@ model_params = {
                 "enabled": True,       # 是否开启加权
                 "start_weight": 1.0,   # T=0 的权重
                 "end_weight": 10.0,    # T=119 的权重
+                "ignore_steps": 25,    # 前 N 小时不计入损失 (例如 0-24 共25小时)
+                "ignore_weight": 0.0,  # 被忽略时间段的权重
                 "tv_weight": 0.01,     # 平滑约束(TV Loss)权重，建议 0.005 ~ 0.02
                 "l1_weight": 0.1       # 稀疏性惩罚，保护 0 偏差区域
             }

@@ -59,11 +59,24 @@ def total_variation_loss(img, weight=1.0):
     tv_w = torch.pow(img[:, :, 1:, :] - img[:, :, :-1, :], 2).sum()
     return weight * (tv_h + tv_w) / (b * t * h * w)
 
-def weighted_masked_rmse_loss(pred, target, mask, start_w=1.0, end_w=5.0, epsilon=1e-6):
+def weighted_masked_rmse_loss(
+    pred,
+    target,
+    mask,
+    start_w=1.0,
+    end_w=5.0,
+    ignore_steps=0,
+    ignore_weight=0.0,
+    epsilon=1e-6,
+):
     """RMSE + 时间加权"""
     diff = (pred - target) ** 2
     steps = pred.shape[1]
     weights = torch.linspace(start_w, end_w, steps, device=pred.device).view(1, -1, 1, 1)
+
+    if ignore_steps and ignore_steps > 0:
+        ignore_steps = min(ignore_steps, steps)
+        weights[:, :ignore_steps] = ignore_weight
     
     weighted_diff = diff * weights * mask
     mse = weighted_diff.sum() / (mask.sum() + 1e-6)
@@ -193,9 +206,15 @@ def run():
             
             # Loss Calculation
             # 1. RMSE (Main)
-            rmse_loss = weighted_masked_rmse_loss(pred_bias, gt_bias, mask, 
-                                                  start_w=w_cfg['start_weight'], 
-                                                  end_w=w_cfg['end_weight'])
+            rmse_loss = weighted_masked_rmse_loss(
+                pred_bias,
+                gt_bias,
+                mask,
+                start_w=w_cfg['start_weight'],
+                end_w=w_cfg['end_weight'],
+                ignore_steps=w_cfg.get('ignore_steps', 0),
+                ignore_weight=w_cfg.get('ignore_weight', 0.0),
+            )
             
             # 2. TV (Smoothing)
             tv_loss = total_variation_loss(pred_bias, weight=w_cfg['tv_weight'])
@@ -231,9 +250,15 @@ def run():
                 gt_bias = x[:, :120] - y
                 
                 # 验证集只看 RMSE
-                v_loss = weighted_masked_rmse_loss(pred_bias, gt_bias, mask,
-                                                   start_w=w_cfg['start_weight'], 
-                                                   end_w=w_cfg['end_weight'])
+                v_loss = weighted_masked_rmse_loss(
+                    pred_bias,
+                    gt_bias,
+                    mask,
+                    start_w=w_cfg['start_weight'],
+                    end_w=w_cfg['end_weight'],
+                    ignore_steps=w_cfg.get('ignore_steps', 0),
+                    ignore_weight=w_cfg.get('ignore_weight', 0.0),
+                )
                 val_rmse_total += v_loss.item()
         
         avg_val_rmse = val_rmse_total / len(val_loader)
@@ -252,7 +277,8 @@ def run():
         
         # --- Early Stopping & Save ---
         delta = trainer_cfg['early_stopping'].get('delta', 0.0)
-        if avg_val_rmse < (best_val_loss - delta):
+        improved = avg_val_rmse < (best_val_loss - delta)
+        if improved:
             best_val_loss = avg_val_rmse
             best_epoch = epoch
             early_stop_cnt = 0
@@ -266,8 +292,9 @@ def run():
             print(f"🛑 触发早停机制，训练结束。")
             break
             
-        # 可视化 (抽取 Val 中的样本)
-        visualize_prediction(model, val_loader, device, epoch, save_dir=exp_cfg['save_dir'])
+        # 可视化 (仅在性能提升时)
+        if improved:
+            visualize_prediction(model, val_loader, device, epoch, save_dir=exp_cfg['save_dir'])
 
     # 训练曲线
     if history_train_rmse and history_val_rmse:
@@ -310,9 +337,15 @@ def run():
             gt_bias = x[:, :120] - y
             
             # 计算纯粹的 RMSE (不带时间权重，或者带权重看需求，这里计算带权重的以便对比)
-            t_loss = weighted_masked_rmse_loss(pred_bias, gt_bias, mask, 
-                                               start_w=w_cfg['start_weight'], 
-                                               end_w=w_cfg['end_weight'])
+            t_loss = weighted_masked_rmse_loss(
+                pred_bias,
+                gt_bias,
+                mask,
+                start_w=w_cfg['start_weight'],
+                end_w=w_cfg['end_weight'],
+                ignore_steps=w_cfg.get('ignore_steps', 0),
+                ignore_weight=w_cfg.get('ignore_weight', 0.0),
+            )
             
             # 计算平均绝对误差 (MAE) 看物理量级
             mae = (torch.abs(pred_bias - gt_bias) * mask).sum() / (mask.sum() + 1e-6)

@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import os
 import random
+from config import model_params
 
 def visualize_prediction(model, val_loader, device, epoch, save_dir='./results'):
     """
@@ -31,6 +32,11 @@ def visualize_prediction(model, val_loader, device, epoch, save_dir='./results')
     with torch.no_grad():
         # 模型输出 Bias
         pred_bias = model(x)
+
+    # ignore_steps = model_params['CResU_Net']['trainer']['loss_weights'].get('ignore_steps', 0)
+    # if ignore_steps and ignore_steps > 0:
+    #     ignore_steps = min(ignore_steps, pred_bias.shape[1])
+    #     pred_bias[:, :ignore_steps] = 0.0
     
     # --- 2. 还原 SST ---
     input_sst_tensor = x[0, :120]

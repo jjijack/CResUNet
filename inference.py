@@ -25,7 +25,7 @@ def _load_land_mask(forecast_path):
     return np.nan_to_num(raw_mask, nan=0.0)[np.newaxis, :, :]
 
 
-def correct_run_from_nc(model_path, forecast_path, run_idx=0, device=None):
+def correct_run_from_nc(model_path, forecast_path, run_idx=0, device=None, ignore_steps=None):
     """
     读取某一天的 120 小时预报，输出订正后的 120 小时结果。
     返回: corrected_sst, pred_bias
@@ -49,6 +49,12 @@ def correct_run_from_nc(model_path, forecast_path, run_idx=0, device=None):
 
     with torch.no_grad():
         pred_bias = model(x_tensor)
+
+    if ignore_steps is None:
+        ignore_steps = model_params['CResU_Net']['trainer']['loss_weights'].get('ignore_steps', 0)
+    if ignore_steps and ignore_steps > 0:
+        ignore_steps = min(ignore_steps, pred_bias.shape[1])
+        pred_bias[:, :ignore_steps] = 0.0
 
     corrected = x_tensor[0, :120] - pred_bias[0]
     return corrected.cpu().numpy(), pred_bias[0].cpu().numpy()
