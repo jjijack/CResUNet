@@ -18,6 +18,12 @@ data_params = {
         "val_run_count": 7     # 后7个Run用于验证
     },
 
+    "monthly_split": {
+        "train_days": 20,      # 每月前 20 天训练
+        "val_days": 5,         # 接着 5 天验证
+        "test_days": 5         # 最后 5 天测试
+    },
+
     "num_workers": 4,          # DataLoader 线程数
     "check_files": False,      # 是否检查文件完整性
     
@@ -51,7 +57,7 @@ model_params = {
             
             # --- 早停机制 ---
             "early_stopping": {
-                "tolerance": 15,       # 忍受15轮 (原 early_stop_tolerance)
+                "tolerance": 20,       # 忍受15轮 (原 early_stop_tolerance)
                 "delta": 1e-6          # 最小下降幅度
             },
 

@@ -1,118 +1,136 @@
 import torch
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from dataset import NCCorrectionDataset  # 导入新写的 Dataset
+from dataset import NCCorrectionDataset
 from models.baseline.CResU_Net import CRUNet
 from config import experiment_params, data_params, model_params
 from visualize import visualize_prediction
 import os
 import shutil
-import random
 
-def masked_mse_loss(pred, target, mask):
+# ==========================================
+# 1. 工具函数与 Loss 定义
+# ==========================================
+
+def create_monthly_split(run_dates, train_days=20, val_days=5, test_days=5):
     """
-    只计算有效区域(mask=1)的均方误差
+    按自然月切分：每月前段训练，后段验证 + 测试。
     """
-    diff = (pred - target) ** 2
-    # 只保留有效部分的误差
-    valid_diff = diff * mask 
-    
-    # 计算平均值：总误差 / 有效像素数
-    # 加上 1e-6 防止除以 0
-    loss = valid_diff.sum() / (mask.sum() + 1e-6)
-    return loss
+    train_idx = []
+    val_idx = []
+    test_idx = []
+
+    month_map = {}
+    for idx, d in enumerate(run_dates):
+        if d is None:
+            raise ValueError("无法从 valid_time 解析日期，请检查时间单位或时间字段。")
+        key = (d.year, d.month)
+        month_map.setdefault(key, []).append((d, idx))
+
+    for key in sorted(month_map.keys()):
+        items = sorted(month_map[key], key=lambda x: x[0])
+        indices = [idx for _, idx in items]
+        n = len(indices)
+        if n == 0:
+            continue
+
+        test_count = min(test_days, n)
+        val_count = min(val_days, n - test_count)
+        train_count = n - val_count - test_count
+
+        train_idx.extend(indices[:train_count])
+        val_idx.extend(indices[train_count:train_count + val_count])
+        test_idx.extend(indices[train_count + val_count:])
+
+    return train_idx, val_idx, test_idx
+
+def clear_output_dir(save_dir='./results'):
+    if os.path.exists(save_dir):
+        shutil.rmtree(save_dir)
+    os.makedirs(save_dir)
+
+# --- Loss Functions ---
 
 def total_variation_loss(img, weight=1.0):
-    """
-    计算全变分损失 (Total Variation Loss)，用于平滑图像
-    img: [Batch, Time, H, W]
-    """
+    """平滑性约束"""
     b, t, h, w = img.size()
-    
-    # 计算水平方向差异 (右边像素 - 左边像素)
     tv_h = torch.pow(img[:, :, :, 1:] - img[:, :, :, :-1], 2).sum()
-    
-    # 计算垂直方向差异 (下边像素 - 上边像素)
     tv_w = torch.pow(img[:, :, 1:, :] - img[:, :, :-1, :], 2).sum()
-    
     return weight * (tv_h + tv_w) / (b * t * h * w)
 
 def weighted_masked_rmse_loss(pred, target, mask, start_w=1.0, end_w=5.0, epsilon=1e-6):
-    """
-    计算带时间权重的 RMSE Loss (Root Mean Squared Error)
-    参数:
-        start_w: T=0 时刻的权重 (默认1.0)
-        end_w:   T=End 时刻的权重 (默认5.0)
-    """
-    # 1. 基础差异平方
+    """RMSE + 时间加权"""
     diff = (pred - target) ** 2
-    
-    # 2. 构造时间权重
     steps = pred.shape[1]
-    weights = torch.linspace(start_w, end_w, steps, device=pred.device)
-    weights = weights.view(1, -1, 1, 1)
+    weights = torch.linspace(start_w, end_w, steps, device=pred.device).view(1, -1, 1, 1)
     
-    # 3. 应用权重和掩码
     weighted_diff = diff * weights * mask
-    
-    # 4. 计算 MSE
     mse = weighted_diff.sum() / (mask.sum() + 1e-6)
+    return torch.sqrt(mse + epsilon)
+
+def smart_background_l1_loss(pred, target, mask, zero_threshold=0.1):
+    """
+    智能 L1：只惩罚 Ground Truth 本来就是 0 (背景) 的区域
+    防止 L1 过大导致模型不敢修正真实偏差
+    """
+    # 找出真值几乎为 0 的区域 (背景/无偏差区)
+    is_background = (torch.abs(target) < zero_threshold).float()
     
-    # 5. 【关键修改】 开根号变成 RMSE
-    # 加 epsilon 是为了防止 mse 为 0 时导致梯度为 NaN
-    loss = torch.sqrt(mse + epsilon)
+    # 背景 Mask = 海洋 Mask AND 真值是背景
+    bg_mask = mask * is_background
     
+    # 计算 L1
+    loss = (torch.abs(pred) * bg_mask).sum() / (bg_mask.sum() + 1e-6)
     return loss
 
-def clear_output_dir(save_dir='./results'):
-    """
-    程序启动时清空输出目录，防止旧图片堆积
-    """
-    if os.path.exists(save_dir):
-        # 递归删除整个文件夹
-        shutil.rmtree(save_dir)
-        print(f"已清空旧输出目录: {save_dir}")
-    
-    # 重新创建空文件夹
-    os.makedirs(save_dir)
+
+# ==========================================
+# 2. 主流程 Run
+# ==========================================
 
 def run():
-    # 1. 读取配置参数
+    # --- 配置读取 ---
     exp_cfg = experiment_params
     data_cfg = data_params
     model_cfg = model_params['CResU_Net']
     trainer_cfg = model_cfg['trainer']
     
     device = torch.device(exp_cfg['device'] if torch.cuda.is_available() else 'cpu')
-    
-    # 2. 环境初始化
     clear_output_dir(exp_cfg['save_dir'])
-    
-    # 3. 数据集初始化 (关键修改：不再使用 random_split)
-    print("正在初始化训练集 ...")
+
+    # --- 数据集初始化 ---
+    print("正在加载全量数据集 ...")
     full_dataset = NCCorrectionDataset(
         data_cfg['forecast_path'], 
         data_cfg['reanalysis_path'], 
     )
-    
-    # 4. 手动划分索引 (前24个Run训练，后7个Run验证)
-    total_runs = len(full_dataset)
-    split_point = 24 # 或者使用 data_cfg['split']['train_run_count']
-    
-    indices = list(range(total_runs))
-    # 设定种子，保证虽然是乱序，但每次乱得都一样 (方便复现)
-    random.seed(42) 
-    random.shuffle(indices)
+    run_dates = full_dataset.get_run_dates()
 
-    train_indices = indices[:split_point]
-    val_indices = indices[split_point:]
-    
-    train_ds = Subset(full_dataset, train_indices)
-    val_ds = Subset(full_dataset, val_indices)
-    
-    print(f"数据集划分完成 -> 训练集: {len(train_ds)}, 验证集: {len(val_ds)}")
+    # --- [关键] 按自然月切分 ---
+    split_cfg = data_cfg.get('monthly_split', {})
+    train_days = split_cfg.get('train_days', 20)
+    val_days = split_cfg.get('val_days', 5)
+    test_days = split_cfg.get('test_days', 5)
 
-    # 5. DataLoader
+    train_idx, val_idx, test_idx = create_monthly_split(
+        run_dates,
+        train_days=train_days,
+        val_days=val_days,
+        test_days=test_days
+    )
+    
+    # 创建 Subset (只是索引映射，不耗内存)
+    train_ds = Subset(full_dataset, train_idx)
+    val_ds = Subset(full_dataset, val_idx)
+    test_ds = Subset(full_dataset, test_idx)
+    
+    print(f"数据集划分完成 (Periodic Split):")
+    print(f"  Train: {len(train_ds)} (反向传播)")
+    print(f"  Val  : {len(val_ds)} (模型优选 & Buffer)")
+    print(f"  Test : {len(test_ds)} (最终评估)")
+
+    # DataLoader
     batch_size = model_cfg['batch_gen']['batch_size']
     num_workers = data_cfg['num_workers']
     
@@ -120,145 +138,195 @@ def run():
                               num_workers=num_workers, pin_memory=True, persistent_workers=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, 
                             num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    # Test loader 在训练完后再用
 
-    # 6. 模型初始化
-    in_chan = model_cfg['core']['in_channels']
-    out_chan = model_cfg['core']['out_channels']
-    
+    # --- 模型初始化 ---
     model = CRUNet(
-        in_channels=in_chan, 
-        out_channels=out_chan, 
+        in_channels=model_cfg['core']['in_channels'],
+        out_channels=model_cfg['core']['out_channels'],
         selected_dim=0,
         device=device
     ).to(device)
-    
-    # 7. 优化器 & 调度器 & 早停
+
+    print("模型初始化完成")
+
+    # --- 优化器 ---
     optimizer = torch.optim.Adam(
         model.parameters(), 
         lr=trainer_cfg['learning_rate'],
         weight_decay=trainer_cfg['weight_decay']
     )
     
+    # 推荐使用 Cosine 以跳出局部最优，或者继续用 ReduceLROnPlateau
+    scheduler_cfg = trainer_cfg['lr_scheduler']
     scheduler = ReduceLROnPlateau(
         optimizer,
-        mode=trainer_cfg['lr_scheduler']['mode'],
-        factor=trainer_cfg['lr_scheduler']['factor'],
-        patience=trainer_cfg['lr_scheduler']['patience'],
+        mode=scheduler_cfg['mode'],
+        factor=scheduler_cfg['factor'],
+        patience=scheduler_cfg['patience']
     )
     
-    # 早停控制变量
+    # Loss 权重
+    w_cfg = trainer_cfg['loss_weights']
+    print(f"Loss配置: StartW={w_cfg['start_weight']}, EndW={w_cfg['end_weight']}, "
+          f"TV={w_cfg['tv_weight']}, L1={w_cfg['l1_weight']}")
+
+    # --- 训练循环 ---
     best_val_loss = float('inf')
-    early_stop_patience = trainer_cfg['early_stopping']['tolerance']
-    early_stop_counter = 0
-    
-    # Loss 权重配置
-    loss_w_start = trainer_cfg['loss_weights']['start_weight']
-    loss_w_end = trainer_cfg['loss_weights']['end_weight']
-    l1_w = trainer_cfg['loss_weights'].get('l1_weight', 0.0) # 默认0.0防报错
+    best_epoch = None
+    early_stop_cnt = 0
+    save_path = os.path.join(exp_cfg['save_dir'], exp_cfg['model_save_name'])
+    history_train_rmse = []
+    history_val_rmse = []
 
-    loss_tv_weight = trainer_cfg['loss_weights'].get('tv_weight', 0.0) # 默认0.0防报错
-
-    print(f"🚀 开始训练 (Epochs={trainer_cfg['num_epochs']})...")
-
-    # 8. 训练循环
     for epoch in range(1, trainer_cfg['num_epochs'] + 1):
         model.train()
-        train_combined_loss = 0
-        train_rmse_total = 0
-        train_tv_total = 0
-        train_l1_total = 0
+        log_meters = {'loss': 0, 'rmse': 0, 'tv': 0, 'l1': 0}
         
-        
-        # --- Training Step ---
         for x, y, mask in train_loader:
             x, y, mask = x.to(device), y.to(device), mask.to(device)
-            
             optimizer.zero_grad()
             
-            # (1) 模型预测 Bias
+            # Forward
             pred_bias = model(x)
+            gt_bias = x[:, :120] - y # Forecast - Reanalysis
             
-            # (2) 计算 GT Bias (Input - Target)
-            # 假设 input 在 x 的前120通道
-            gt_bias = x[:, :120] - y 
-            
-            # (3) 计算 Loss
-            # 1. 主 Loss (RMSE) - 负责准确性
+            # Loss Calculation
+            # 1. RMSE (Main)
             rmse_loss = weighted_masked_rmse_loss(pred_bias, gt_bias, mask, 
-                                            start_w=loss_w_start, end_w=loss_w_end)
-            # 2. 辅助 Loss (TV) - 负责平滑性
-            tv_loss = total_variation_loss(pred_bias, weight=loss_tv_weight)
-
-            # 3. L1 (稀疏 - 保护 0 值)
-            l1_loss = (torch.abs(pred_bias) * mask).sum() / mask.sum()
-            l1_loss = l1_loss * l1_w # 乘上权重
-
-            # 3. 总 Loss
+                                                  start_w=w_cfg['start_weight'], 
+                                                  end_w=w_cfg['end_weight'])
+            
+            # 2. TV (Smoothing)
+            tv_loss = total_variation_loss(pred_bias, weight=w_cfg['tv_weight'])
+            
+            # 3. Smart L1 (Background Suppression)
+            # 只有当真实偏差 < 0.1 时，才惩罚 L1
+            l1_loss = smart_background_l1_loss(pred_bias, gt_bias, mask, zero_threshold=0.1)
+            l1_loss = l1_loss * w_cfg['l1_weight']
+            
+            # Total
             loss = rmse_loss + tv_loss + l1_loss
-
+            
             loss.backward()
             optimizer.step()
-
-            train_combined_loss += loss.item()
-            train_rmse_total += rmse_loss.item()
-            train_tv_total += tv_loss.item()
-            train_l1_total += l1_loss.item()
-        
+            
+            # Record
+            log_meters['loss'] += loss.item()
+            log_meters['rmse'] += rmse_loss.item()
+            log_meters['tv'] += tv_loss.item()
+            log_meters['l1'] += l1_loss.item()
+            
+        # Averages
         steps = len(train_loader)
-        avg_train_loss = train_combined_loss / steps
-        avg_train_rmse = train_rmse_total / steps
-        avg_train_tv = train_tv_total / steps
-        avg_train_l1 = train_l1_total / steps
+        avg_train = {k: v/steps for k, v in log_meters.items()}
 
-        # --- Validation Step ---
+        # --- Validation ---
         model.eval()
-        val_loss_total = 0
+        val_rmse_total = 0
         with torch.no_grad():
             for x, y, mask in val_loader:
                 x, y, mask = x.to(device), y.to(device), mask.to(device)
-                
                 pred_bias = model(x)
                 gt_bias = x[:, :120] - y
-                loss = weighted_masked_rmse_loss(pred_bias, gt_bias, mask,
-                                                start_w=loss_w_start, end_w=loss_w_end)
-                val_loss_total += loss.item()
+                
+                # 验证集只看 RMSE
+                v_loss = weighted_masked_rmse_loss(pred_bias, gt_bias, mask,
+                                                   start_w=w_cfg['start_weight'], 
+                                                   end_w=w_cfg['end_weight'])
+                val_rmse_total += v_loss.item()
         
-        avg_val_loss = val_loss_total / len(val_loader)
+        avg_val_rmse = val_rmse_total / len(val_loader)
+        history_train_rmse.append(avg_train['rmse'])
+        history_val_rmse.append(avg_val_rmse)
 
-        # --- 日志与调度 ---
-        current_lr = optimizer.param_groups[0]['lr']
+        # --- Log & Schedule ---
+        lr = optimizer.param_groups[0]['lr']
         print(f"Epoch {epoch}/{trainer_cfg['num_epochs']} | "
-              f"Val RMSE: {avg_val_loss:.6f} | "
-              f"Train RMSE: {avg_train_rmse:.4f} "
-              f"(TV: {avg_train_tv:.4f}, L1: {avg_train_l1:.4f}) | "
-              f"LR: {current_lr:.2e}")
+              f"Val RMSE: {avg_val_rmse:.5f} | "
+              f"Train RMSE: {avg_train['rmse']:.4f} "
+              f"(L1: {avg_train['l1']:.4f}, TV: {avg_train['tv']:.4f}) | "
+              f"LR: {lr:.2e}")
         
-        # 更新学习率
-        scheduler.step(avg_val_loss)
+        scheduler.step(avg_val_rmse)
         
-        # --- 早停与保存 ---
-        # 加上微小的 delta 阈值，防止 Loss 震荡导致误判
-        delta = trainer_cfg['early_stopping']['delta']
-        
-        if avg_val_loss < (best_val_loss - delta):
-            best_val_loss = avg_val_loss
-            early_stop_counter = 0
-            # 保存模型
-            save_path = os.path.join(exp_cfg['save_dir'], exp_cfg['model_save_name'])
+        # --- Early Stopping & Save ---
+        delta = trainer_cfg['early_stopping'].get('delta', 0.0)
+        if avg_val_rmse < (best_val_loss - delta):
+            best_val_loss = avg_val_rmse
+            best_epoch = epoch
+            early_stop_cnt = 0
             torch.save(model.state_dict(), save_path)
             print(f"--> ✨ 性能提升！模型已保存: {save_path}")
         else:
-            early_stop_counter += 1
-            print(f"--> 💤 性能未提升 ({early_stop_counter}/{early_stop_patience})")
+            early_stop_cnt += 1
+            print(f"--> 💤 性能未提升 ({early_stop_cnt}/{trainer_cfg['early_stopping']['tolerance']})")
             
-        if early_stop_counter >= early_stop_patience:
+        if early_stop_cnt >= trainer_cfg['early_stopping']['tolerance']:
             print(f"🛑 触发早停机制，训练结束。")
             break
-
-        # --- 可视化 ---
+            
+        # 可视化 (抽取 Val 中的样本)
         visualize_prediction(model, val_loader, device, epoch, save_dir=exp_cfg['save_dir'])
+
+    # 训练曲线
+    if history_train_rmse and history_val_rmse:
+        plt.figure(figsize=(8, 4))
+        plt.plot(range(1, len(history_train_rmse) + 1), history_train_rmse, label='Train RMSE')
+        plt.plot(range(1, len(history_val_rmse) + 1), history_val_rmse, label='Val RMSE')
+        plt.xlabel('Epoch')
+        plt.ylabel('RMSE')
+        plt.title('Training Curve')
+        plt.legend()
+        plt.tight_layout()
+        curve_path = os.path.join(exp_cfg['save_dir'], 'loss_curve.png')
+        plt.savefig(curve_path)
+        plt.close()
+        print(f"训练曲线已保存: {curve_path}")
+
+    if best_epoch is not None:
+        print(f"最佳模型来自第 {best_epoch} 个 epoch，Val RMSE: {best_val_loss:.6f}")
+
+    # ==========================================
+    # 3. 最终测试 (Test Step)
+    # ==========================================
+    print("\n" + "="*40)
+    print("🏆 训练结束，开始在 Test Set 上评估最佳模型...")
+    print("="*40)
     
-    print(f"🏁 训练流程结束。最佳验证集 Loss: {best_val_loss:.6f}")
+    # 加载最佳权重
+    model.load_state_dict(torch.load(save_path, weights_only=True))
+    model.eval()
+    
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    
+    test_rmse_total = 0
+    test_l1_total = 0
+    
+    with torch.no_grad():
+        for x, y, mask in test_loader:
+            x, y, mask = x.to(device), y.to(device), mask.to(device)
+            pred_bias = model(x)
+            gt_bias = x[:, :120] - y
+            
+            # 计算纯粹的 RMSE (不带时间权重，或者带权重看需求，这里计算带权重的以便对比)
+            t_loss = weighted_masked_rmse_loss(pred_bias, gt_bias, mask, 
+                                               start_w=w_cfg['start_weight'], 
+                                               end_w=w_cfg['end_weight'])
+            
+            # 计算平均绝对误差 (MAE) 看物理量级
+            mae = (torch.abs(pred_bias - gt_bias) * mask).sum() / (mask.sum() + 1e-6)
+            
+            test_rmse_total += t_loss.item()
+            test_l1_total += mae.item()
+            
+    avg_test_rmse = test_rmse_total / len(test_loader)
+    avg_test_mae = test_l1_total / len(test_loader)
+    
+    print(f"📊 最终测试集结果 (Test Set):")
+    print(f"   RMSE Score : {avg_test_rmse:.5f}")
+    print(f"   MAE  Score : {avg_test_mae:.5f} °C")
+    print(f"   模型保存路径: {save_path}")
 
 if __name__ == '__main__':
     run()
