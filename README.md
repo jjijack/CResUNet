@@ -4,24 +4,20 @@ We propose a coordination attention residual U-Net(CResU-Net) model designed to 
 
 ## File Structure
 
-batch_generator.py: Handles batch generation for training.
-
 config.py: Contains configuration settings.
 
-data_creator.py: Processes datasets.
+run.py: Main training script (train/val/test).
 
-dataset.py: Manages dataset loading and preprocessing.
+train_utils.py: Training utilities (splits, losses, helpers).
 
-experiment.py: Runs experiments or evaluations.
+inference.py: Inference helpers and visualization/metrics.
 
-run.py: Main script for training or testing.
+visualize.py: Training-time visualization utilities.
 
-trainer.py: Contains training logic.
+dataset.py: Dataset loading and preprocessing for NetCDF.
 
-model/: Includes model definitions and components.
+models/baseline/CResU_Net.py: Implementation of the CResU-Net model.
 
-adaptive_normalizer.py: Normalizes inputs during training or inference.
+data/: NetCDF inputs.
 
-baseline/CResU_net.py: Implementation of the CResU-Net model.
-
-transformer/: Contains data transformers.
+results/: Saved models and outputs.
