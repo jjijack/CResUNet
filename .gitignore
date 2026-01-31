@@ -24,7 +24,6 @@ wandb/
 runs/
 
 # Data files
-data/
 *.nc
 results/
 *.npy
