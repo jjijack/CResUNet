@@ -10,3 +10,8 @@ dependencies:
   - mkl=2021.4.0
   - pandas
   - netcdf4
+  - matplotlib
+  - tqdm
+  - ipykernel
+  - scipy
+prefix: /home/user3/.conda/envs/torch

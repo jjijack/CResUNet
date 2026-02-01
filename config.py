@@ -13,11 +13,6 @@ data_params = {
     "reanalysis_path": './data/reanalysis_structured.nc',
     
     # 数据集切分参数 (替代原本的日期切分)
-    "split": {
-        "train_run_count": 24, # 前24个Run用于训练
-        "val_run_count": 7     # 后7个Run用于验证
-    },
-
     "monthly_split": {
         "train_days": 20,      # 每月前 20 天训练
         "val_days": 5,         # 接着 5 天验证
