@@ -183,3 +183,119 @@ def compute_run_rmse(
     print(f"RMSE (Forecast): {rmse_forecast:.5f}°C")
     print(f"RMSE (Corrected): {rmse_corrected:.5f}°C")
     return rmse_forecast, rmse_corrected
+
+
+def compute_yearly_error(
+    model_path,
+    forecast_path,
+    reanalysis_path,
+    device=None,
+    batch_size=4,
+    mask_initial_steps=True,
+):
+    """
+    统计全年 RMSE/MAE（Forecast vs Corrected）。
+    返回: ((rmse_forecast, mae_forecast), (rmse_corrected, mae_corrected))
+    """
+    if device is None:
+        device = torch.device(experiment_params['device'] if torch.cuda.is_available() else 'cpu')
+    elif not isinstance(device, torch.device):
+        device = torch.device(device)
+
+    model = _build_model(device)
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    model.eval()
+
+    ignore_steps = model_params['CResU_Net']['trainer']['loss_weights'].get('ignore_steps', 0)
+
+    sum_abs_fc = 0.0
+    sum_abs_corr = 0.0
+    sum_sq_fc = 0.0
+    sum_sq_corr = 0.0
+    count = 0
+
+    with NCDataset(forecast_path, 'r') as fc_ds, NCDataset(reanalysis_path, 'r') as ra_ds:
+        ra_times = ra_ds.variables['time'][:]
+        ra_map = {round(float(x), 2): i for i, x in enumerate(ra_times)}
+
+        run_count = fc_ds.dimensions['run'].size
+        land_mask = fc_ds.variables['land_mask'][:]
+        ocean_mask = np.nan_to_num(land_mask, nan=0.0)
+
+        for start in range(0, run_count, batch_size):
+            end = min(start + batch_size, run_count)
+            batch_indices = list(range(start, end))
+
+            fc_batch = fc_ds.variables['sst'][batch_indices]
+            fc_batch = np.nan_to_num(fc_batch, nan=0.0)
+
+            mask_channel = np.broadcast_to(ocean_mask, (len(batch_indices), 1) + ocean_mask.shape)
+            x = np.concatenate((fc_batch, mask_channel), axis=1)
+
+            x_tensor = torch.from_numpy(x).float().to(device)
+            with torch.no_grad():
+                pred_bias = model(x_tensor)
+            if mask_initial_steps and ignore_steps and ignore_steps > 0:
+                pred_bias[:, :ignore_steps] = 0.0
+
+            corrected = (x_tensor[:, :120] - pred_bias).cpu().numpy()
+
+            for b, run_idx in enumerate(batch_indices):
+                fc_times = fc_ds.variables['valid_time'][run_idx]
+                time_pairs = [(t, ra_map.get(round(float(fc_time), 2))) for t, fc_time in enumerate(fc_times)]
+                time_pairs = [(t, idx) for t, idx in time_pairs if idx is not None]
+                if len(time_pairs) == 0:
+                    continue
+
+                t_indices = [t for t, _ in time_pairs]
+                ra_indices = [idx for _, idx in time_pairs]
+
+                target = ra_ds.variables['sst'][ra_indices]
+                target = np.nan_to_num(target, nan=0.0)
+
+                fc_sel = fc_batch[b, t_indices].copy()
+                corr_sel = corrected[b, t_indices].copy()
+                target = target.copy()
+
+                fc_sel[:, ocean_mask == 0] = np.nan
+                corr_sel[:, ocean_mask == 0] = np.nan
+                target[:, ocean_mask == 0] = np.nan
+
+                diff_fc = fc_sel - target
+                diff_corr = corr_sel - target
+
+                sum_abs_fc += np.nansum(np.abs(diff_fc))
+                sum_abs_corr += np.nansum(np.abs(diff_corr))
+                sum_sq_fc += np.nansum(diff_fc ** 2)
+                sum_sq_corr += np.nansum(diff_corr ** 2)
+                count += np.sum(~np.isnan(target))
+
+    if count == 0:
+        raise ValueError("没有找到可用的时间步用于误差统计")
+
+    mae_fc = sum_abs_fc / count
+    mae_corr = sum_abs_corr / count
+    rmse_fc = np.sqrt(sum_sq_fc / count)
+    rmse_corr = np.sqrt(sum_sq_corr / count)
+
+    print(f"RMSE (Forecast): {rmse_fc:.5f} °C")
+    print(f"MAE  (Forecast): {mae_fc:.5f} °C")
+    print(f"RMSE (Corrected): {rmse_corr:.5f} °C")
+    print(f"MAE  (Corrected): {mae_corr:.5f} °C")
+
+    return (rmse_fc, mae_fc), (rmse_corr, mae_corr)
+
+
+def compute_yearly_mae(model_path, forecast_path, reanalysis_path, device=None, batch_size=4):
+    """
+    兼容旧接口：仅返回 MAE。
+    """
+    (rmse_fc, mae_fc), (rmse_corr, mae_corr) = compute_yearly_error(
+        model_path=model_path,
+        forecast_path=forecast_path,
+        reanalysis_path=reanalysis_path,
+        device=device,
+        batch_size=batch_size,
+        mask_initial_steps=True,
+    )
+    return mae_fc, mae_corr
