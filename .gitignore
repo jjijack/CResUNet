@@ -10,7 +10,8 @@ venv/
 conda-env/
 .envs/
 
-# Jupyter
+# Development tools
+.vscode/
 .ipynb_checkpoints/
 
 # PyTorch / ML
@@ -24,9 +25,11 @@ wandb/
 runs/
 
 # Data files
+out/
+train_results/
 *.nc
-results/
 *.npy
+*.npz
 *.jpg
 *.png
 *.csv

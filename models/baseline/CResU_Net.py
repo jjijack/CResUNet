@@ -285,7 +285,7 @@ class CRUNet(nn.Module):
 
     def forward(self, x, **kwargs):
 
-        # 直接使用完整的输入 x，因为 run.py 里已经配置好了 in_channels=120
+        # 直接使用完整的输入 x，因为 train.py 里已经配置好了 in_channels=120
         # x = x[:, :, self.selected_dim]
 
         x1 = self.inc(x)

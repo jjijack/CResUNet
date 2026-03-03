@@ -3,12 +3,12 @@ experiment_params = {
     "model": "CResU_Net",
     "device": 'cuda',
     "operation_mode": "train_mode",
-    "save_dir": './results',      # 结果保存路径
+    "save_dir": './train_results',      # 结果保存路径
     "model_save_name": 'best_model.pth' # 最佳模型文件名
 }
 
 data_params = {
-    # 替换为你的 .nc 文件路径
+    # .nc 文件路径
     "forecast_path": './data/forecast_structured.nc',
     "reanalysis_path": './data/reanalysis_structured.nc',
     
@@ -22,7 +22,7 @@ data_params = {
     "num_workers": 4,          # DataLoader 线程数
     "check_files": False,      # 是否检查文件完整性
     
-    # --- 以下参数在当前 .nc 模式下可能暂时用不到，但保留以防万一 ---
+    # --- 原始模型的参数，在当前 .nc 模式下可能暂时用不到，但保留以防万一 ---
     "weather_raw_dir": 'F:\\OSTIA', 
     "area_name": "NSCS",
     "spatial_range": [[17, 22], [113, 120]], 
