@@ -12,6 +12,8 @@ train_utils.py: Training utilities (splits, losses, helpers).
 
 predict_utils.py: Inference helpers and visualization/metrics.
 
+predict.py: CLI entry for full-file/time-range correction and structured NetCDF output.
+
 visualize.py: Training-time visualization utilities.
 
 dataset.py: Dataset loading and preprocessing for NetCDF.
@@ -21,6 +23,8 @@ models/baseline/CResU_Net.py: Implementation of the CResU-Net model.
 data/: NetCDF inputs.
 
 results/: Saved models and outputs.
+
+run_predict.sh: Shell wrapper for batch inference (conda env, date-range filtering, optional bias output).
 
 ## 流程&模型简介
 
@@ -34,4 +38,15 @@ results/: Saved models and outputs.
 
 - 文件路径、数据划分和模型超参数保存在`config.py`中，可以按需修改后再运行模型。
 
-3. `predict_demo.ipynb`中提供了读取`train_results/best_model.pth`并输出任一时刻智能订正结果的范例。
+3. `run_predict.sh`用于生产式运行整文件订正流程：
+
+- 默认调用`predict.py`读取`data/forecast_structured.nc`，输出结构化文件`out/forecast_corrected_structured.nc`。
+- 可通过`CONDA_ENV_NAME`指定运行环境；为空时使用当前Python环境。
+- 可通过`START_DATE`和`END_DATE`只预测指定时间范围（例如按月分批）。
+- `SAVE_BIAS=0`为默认设置，仅保存订正后的`sst`；若设为`1`则额外保存`pred_bias`变量。
+
+4. `predict_demo.ipynb`用于推理结果检查与调试，当前分为两部分：
+
+- **订正脚本运行结果加载**：读取`run_predict.sh`/`predict.py`生成的结构化输出`out/forecast_corrected_structured.nc`，按`run_idx + t`展示Forecast、Corrected与二者间的Bias。
+
+- **SST 订正推理调试**：直接加载`train_results/best_model.pth`中的训练结果，对照监督数据进行单日可视化分析，并评估全年预测误差，便于对模型行为做快速诊断。

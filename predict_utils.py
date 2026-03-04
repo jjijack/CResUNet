@@ -1,6 +1,7 @@
 import numpy as np
 import torch
-from netCDF4 import Dataset as NCDataset
+from datetime import datetime
+from netCDF4 import Dataset as NCDataset, date2num
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 
@@ -17,6 +18,159 @@ def _build_model(device):
         device=device
     ).to(device)
     return model
+
+def parse_datetime_input(value):
+    if value is None:
+        return None
+
+    candidates = [
+        "%Y-%m-%d",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y%m%d",
+        "%Y%m%d%H",
+        "%Y%m%d%H%M",
+        "%Y%m%d%H%M%S",
+    ]
+    for fmt in candidates:
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid datetime: {value}. Supported examples: 2026-01-01, 2026-01-01 12:00, 2026010112"
+        ) from exc
+
+
+def select_run_indices_by_date(src_ds, start_date=None, end_date=None):
+    run_count = src_ds.dimensions['run'].size
+    if start_date is None and end_date is None:
+        return np.arange(run_count, dtype=np.int64)
+
+    if 'start_time' in src_ds.variables:
+        time_var = src_ds.variables['start_time']
+        run_times = np.asarray(time_var[:], dtype=np.float64)
+    elif 'valid_time' in src_ds.variables:
+        time_var = src_ds.variables['valid_time']
+        run_times = np.asarray(time_var[:, 0], dtype=np.float64)
+    else:
+        raise ValueError("Neither start_time nor valid_time found in forecast file; cannot filter by date range")
+
+    if not hasattr(time_var, 'units'):
+        raise ValueError("Time variable has no 'units' attribute; cannot parse date range filtering")
+
+    calendar = getattr(time_var, 'calendar', 'standard')
+    start_num = date2num(start_date, units=time_var.units, calendar=calendar) if start_date else None
+    end_num = date2num(end_date, units=time_var.units, calendar=calendar) if end_date else None
+
+    mask = np.ones(run_count, dtype=bool)
+    if start_num is not None:
+        mask &= run_times >= start_num
+    if end_num is not None:
+        mask &= run_times <= end_num
+    return np.where(mask)[0].astype(np.int64)
+
+
+def predict_all_runs_to_nc(
+    model_path,
+    forecast_path,
+    output_nc,
+    device=None,
+    batch_size=4,
+    ignore_steps=None,
+    save_bias=False,
+    start_date=None,
+    end_date=None,
+):
+    if device is None:
+        device = torch.device(experiment_params['device'] if torch.cuda.is_available() else 'cpu')
+    elif not isinstance(device, torch.device):
+        device = torch.device(device)
+
+    model = _build_model(device)
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    model.eval()
+
+    if ignore_steps is None:
+        ignore_steps = model_params['CResU_Net']['trainer']['loss_weights'].get('ignore_steps', 0)
+
+    with NCDataset(forecast_path, 'r') as src, NCDataset(output_nc, 'w', format='NETCDF4') as dst:
+        selected_run_idx = select_run_indices_by_date(src, start_date=start_date, end_date=end_date)
+        if selected_run_idx.size == 0:
+            raise ValueError("No runs found in the specified date range")
+
+        run_count = selected_run_idx.size
+        step_count = src.dimensions['step'].size
+        lat_count = src.dimensions['lat'].size
+        lon_count = src.dimensions['lon'].size
+
+        dst.createDimension('run', run_count)
+        dst.createDimension('step', step_count)
+        dst.createDimension('lat', lat_count)
+        dst.createDimension('lon', lon_count)
+
+        lat_var = dst.createVariable('lat', 'f4', ('lat',))
+        lon_var = dst.createVariable('lon', 'f4', ('lon',))
+        land_mask_var = dst.createVariable('land_mask', 'i1', ('lat', 'lon'), zlib=True)
+        corrected_var = dst.createVariable('sst', 'f4', ('run', 'step', 'lat', 'lon'), zlib=True, fill_value=np.nan)
+        corrected_var.description = 'SST Corrected (Forecast - Predicted Bias)'
+
+        if save_bias:
+            bias_var = dst.createVariable('pred_bias', 'f4', ('run', 'step', 'lat', 'lon'), zlib=True, fill_value=np.nan)
+            bias_var.description = 'Predicted SST Bias'
+        else:
+            bias_var = None
+
+        lat_var[:] = src.variables['lat'][:]
+        lon_var[:] = src.variables['lon'][:]
+        land_mask = np.nan_to_num(src.variables['land_mask'][:], nan=0.0)
+        land_mask_var[:] = land_mask
+
+        if 'start_time' in src.variables:
+            s_src = src.variables['start_time']
+            s_dst = dst.createVariable('start_time', 'f8', ('run',))
+            if hasattr(s_src, 'units'):
+                s_dst.units = s_src.units
+            if hasattr(s_src, 'calendar'):
+                s_dst.calendar = s_src.calendar
+            s_dst[:] = s_src[selected_run_idx]
+
+        if 'valid_time' in src.variables:
+            v_src = src.variables['valid_time']
+            v_dst = dst.createVariable('valid_time', 'f8', ('run', 'step'))
+            if hasattr(v_src, 'units'):
+                v_dst.units = v_src.units
+            if hasattr(v_src, 'calendar'):
+                v_dst.calendar = v_src.calendar
+            v_dst[:] = v_src[selected_run_idx, :]
+
+        for start in range(0, run_count, batch_size):
+            end = min(start + batch_size, run_count)
+            batch_run_idx = selected_run_idx[start:end]
+            fc_batch = src.variables['sst'][batch_run_idx, :, :, :]
+            fc_batch = np.nan_to_num(fc_batch, nan=0.0)
+
+            mask_channel = np.broadcast_to(land_mask, (end - start, 1, lat_count, lon_count))
+            x = np.concatenate((fc_batch, mask_channel), axis=1)
+            x_tensor = torch.from_numpy(x).float().to(device)
+
+            with torch.no_grad():
+                pred_bias = model(x_tensor)
+
+            if ignore_steps and ignore_steps > 0:
+                pred_bias[:, :min(ignore_steps, step_count)] = 0.0
+
+            corrected = (x_tensor[:, :step_count] - pred_bias).cpu().numpy().astype(np.float32)
+            pred_bias_np = pred_bias.cpu().numpy().astype(np.float32)
+
+            corrected_var[start:end, :, :, :] = corrected
+            if bias_var is not None:
+                bias_var[start:end, :, :, :] = pred_bias_np
+
+    print(f"Saved corrected NC to: {output_nc}")
 
 
 def _load_land_mask(forecast_path):
