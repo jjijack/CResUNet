@@ -14,6 +14,10 @@ predict_utils.py: Inference helpers and visualization/metrics.
 
 predict.py: CLI entry for full-file/time-range correction and structured NetCDF output.
 
+data/data_process_utils.py: Data processing helpers for raw-NC interpolation and structured NetCDF writing.
+
+data/data_process.py: CLI entry for converting raw forecast/reanalysis files into structured NetCDF.
+
 visualize.py: Training-time visualization utilities.
 
 dataset.py: Dataset loading and preprocessing for NetCDF.
@@ -25,6 +29,10 @@ data/: NetCDF inputs.
 results/: Saved models and outputs.
 
 run_predict.sh: Shell wrapper for batch inference (conda env, date-range filtering, optional bias output).
+
+run_data_process.sh: Shell wrapper for raw data processing (date-range filtering, optional reanalysis output).
+
+run_all.sh: End-to-end pipeline wrapper (data processing + prediction).
 
 ## 流程&模型简介
 
@@ -38,12 +46,14 @@ run_predict.sh: Shell wrapper for batch inference (conda env, date-range filteri
 
 - 文件路径、数据划分和模型超参数保存在`config.py`中，可以按需修改后再运行模型。
 
-3. `run_predict.sh`用于生产式运行整文件订正流程：
+3. `run_all.sh`用于一键执行“数据处理 + 订正推理”全流程：
 
-- 默认调用`predict.py`读取`data/forecast_structured.nc`，输出结构化文件`out/forecast_corrected_structured.nc`。
-- 可通过`CONDA_ENV_NAME`指定运行环境；为空时使用当前Python环境。
-- 可通过`START_DATE`和`END_DATE`只预测指定时间范围（例如按月分批）。
-- `SAVE_BIAS=0`为默认设置，仅保存订正后的`sst`；若设为`1`则额外保存`pred_bias`变量。
+- 阶段1（`run_data_process.sh`）：调用`data/data_process.py`，将原始`sst_forecast/*.nc`插值整合为`data/forecast_structured.nc`（默认），并可选生成`data/reanalysis_structured.nc`。
+- 阶段2（`run_predict.sh`）：调用`predict.py`，读取`data/forecast_structured.nc`并输出`out/forecast_corrected_structured.nc`。
+- 可通过`START_DATE`和`END_DATE`同时控制两个阶段的日期范围（例如按月分批）。
+- `SAVE_REANALYSIS=0`为默认设置（仅生成predict所需的`forecast_structured.nc`）；设为`1`时额外生成`reanalysis_structured.nc`。
+- `SAVE_BIAS=0`为默认设置（仅保存订正后的`sst`）；设为`1`时预测结果额外保存`pred_bias`变量。
+- 支持`RUN_DATA_PROCESS`和`RUN_PREDICT`阶段开关，可单独执行任一阶段。
 
 4. `predict_demo.ipynb`用于推理结果检查与调试，当前分为两部分：
 

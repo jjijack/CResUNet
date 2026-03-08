@@ -3,19 +3,19 @@
 set -euo pipefail
 
 # ===== 可配置部分 =====
-USER_NAME=user3
-PROJ_ROOT="/home/$USER_NAME/scratch/SST Correction/CResUNet"
-USER_IN="$PROJ_ROOT/data"
-USER_OUT="$PROJ_ROOT/out"
-CONDA_ENV_NAME=torch   # 设为空字符串则使用当前 python
+USER_NAME=${USER_NAME:-user3}
+PROJ_ROOT=${PROJ_ROOT:-"/home/$USER_NAME/scratch/SST Correction/CResUNet"}
+USER_IN=${USER_IN:-"$PROJ_ROOT/data"}
+USER_OUT=${USER_OUT:-"$PROJ_ROOT/out"}
+CONDA_ENV_NAME=${CONDA_ENV_NAME:-torch}   # 设为空字符串则使用当前 python
 
-MODEL_PATH=$PROJ_ROOT/train_results/best_model.pth
-FORECAST_PATH=$PROJ_ROOT/data/forecast_structured.nc
-DEVICE=cuda
-OUTPUT_NC=$USER_OUT/forecast_corrected_structured.nc
-SAVE_BIAS=0  # 是否保存 bias 字段（forecast - corrected）
-START_DATE="20230301"   # 例如: 2023-01-01 或 20230101
-END_DATE="20230331"     # 例如: 2023-03-31 或 20230331
+MODEL_PATH=${MODEL_PATH:-$PROJ_ROOT/train_results/best_model.pth}
+FORECAST_PATH=${FORECAST_PATH:-$PROJ_ROOT/data/forecast_structured.nc}
+DEVICE=${DEVICE:-cuda}
+OUTPUT_NC=${OUTPUT_NC:-$USER_OUT/forecast_corrected_structured.nc}
+SAVE_BIAS=${SAVE_BIAS:-0}  # 是否保存 bias 字段（forecast - corrected）
+START_DATE=${START_DATE:-""}   # 例如: 2023-01-01 或 20230101
+END_DATE=${END_DATE:-""}       # 例如: 2023-03-31 或 20230331
 # ============================================
 
 mkdir -p "$(dirname "$OUTPUT_NC")"
