@@ -4,6 +4,7 @@ from datetime import datetime
 from netCDF4 import Dataset as NCDataset, date2num
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
+from tqdm import tqdm
 
 from config import experiment_params, model_params
 from models.baseline.CResU_Net import CRUNet
@@ -147,7 +148,8 @@ def predict_all_runs_to_nc(
                 v_dst.calendar = v_src.calendar
             v_dst[:] = v_src[selected_run_idx, :]
 
-        for start in range(0, run_count, batch_size):
+        total_batches = (run_count + batch_size - 1) // batch_size
+        for start in tqdm(range(0, run_count, batch_size), total=total_batches, desc="Predicting batches"):
             end = min(start + batch_size, run_count)
             batch_run_idx = selected_run_idx[start:end]
             fc_batch = src.variables['sst'][batch_run_idx, :, :, :]

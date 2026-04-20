@@ -31,14 +31,14 @@ if [ -n "$END_DATE" ]; then
 fi
 
 if [ -n "${CONDA_ENV_NAME}" ]; then
-    conda run -n "$CONDA_ENV_NAME" python "$PROJ_ROOT/predict.py" \
+    PYTHONUNBUFFERED=1 conda run --no-capture-output -n "$CONDA_ENV_NAME" python "$PROJ_ROOT/predict.py" \
         --model "$MODEL_PATH" \
         --forecast "$FORECAST_PATH" \
         --device "$DEVICE" \
         --output-nc "$OUTPUT_NC" \
         "${EXTRA_ARGS[@]}"
 else
-    python "$PROJ_ROOT/predict.py" \
+    PYTHONUNBUFFERED=1 python "$PROJ_ROOT/predict.py" \
         --model "$MODEL_PATH" \
         --forecast "$FORECAST_PATH" \
         --device "$DEVICE" \
