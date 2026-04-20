@@ -3,12 +3,11 @@
 set -euo pipefail
 
 # ===== 可配置部分 =====
-USER_NAME=${USER_NAME:-user3}
-PROJ_ROOT=${PROJ_ROOT:-"/home/$USER_NAME/scratch/SST Correction/CResUNet"}
+PROJ_ROOT=${PROJ_ROOT:-"/home/user3/scratch/SST Correction/CResUNet"}
 CONDA_ENV_NAME=${CONDA_ENV_NAME:-torch}   # 设为空字符串则使用当前 python
 
 # 原始数据目录
-SOURCE_ROOT=${SOURCE_ROOT:-"/home/$USER_NAME/scratch/SST Correction/Getea"}
+SOURCE_ROOT=${SOURCE_ROOT:-"/home/user3/scratch/SST Correction/Getea"}
 FORECAST_PATTERN=${FORECAST_PATTERN:-"$SOURCE_ROOT/sst_forecast/*.nc"}
 REANALYSIS_PATTERN=${REANALYSIS_PATTERN:-"$SOURCE_ROOT/sst_reanalysis/*.nc"}
 

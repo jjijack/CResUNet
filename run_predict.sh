@@ -3,8 +3,7 @@
 set -euo pipefail
 
 # ===== 可配置部分 =====
-USER_NAME=${USER_NAME:-user3}
-PROJ_ROOT=${PROJ_ROOT:-"/home/$USER_NAME/scratch/SST Correction/CResUNet"}
+PROJ_ROOT=${PROJ_ROOT:-"/home/user3/scratch/SST Correction/CResUNet"}
 USER_IN=${USER_IN:-"$PROJ_ROOT/data"}
 USER_OUT=${USER_OUT:-"$PROJ_ROOT/out"}
 CONDA_ENV_NAME=${CONDA_ENV_NAME:-torch}   # 设为空字符串则使用当前 python
