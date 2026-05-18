@@ -6,10 +6,16 @@ set -euo pipefail
 PROJ_ROOT=${PROJ_ROOT:-"/home/user3/scratch/SST Correction/CResUNet"}
 CONDA_ENV_NAME=${CONDA_ENV_NAME:-torch}   # 设为空字符串则使用当前 python
 
-# 原始数据目录
-SOURCE_ROOT=${SOURCE_ROOT:-"/home/user3/scratch/SST Correction/Getea"}
-FORECAST_PATTERN=${FORECAST_PATTERN:-"$SOURCE_ROOT/sst_forecast/*.nc"}
-REANALYSIS_PATTERN=${REANALYSIS_PATTERN:-"$SOURCE_ROOT/sst_reanalysis/*.nc"}
+# --- fvcom 模式 ---
+# DATA_SOURCE=fvcom
+# SOURCE_ROOT="/home/user3/scratch/SST Correction/Getea"
+# FORECAST_PATTERN="$SOURCE_ROOT/sst_forecast/*.nc"
+# REANALYSIS_PATTERN="$SOURCE_ROOT/sst_reanalysis/*.nc"
+
+# --- macom 模式 ---
+DATA_SOURCE=${DATA_SOURCE:-macom}
+SOURCE_ROOT=${SOURCE_ROOT:-"/home/user3/scratch/SST Correction/CURRENT_MACOM_SH"}
+FORECAST_PATTERN=${FORECAST_PATTERN:-"$SOURCE_ROOT/*/*_swt_SH_001h_*.nc"}
 
 # 输出目录
 OUTPUT_DIR=${OUTPUT_DIR:-"$PROJ_ROOT/data"}
@@ -35,16 +41,34 @@ if [ -n "$END_DATE" ]; then
     EXTRA_ARGS+=(--end-date "$END_DATE")
 fi
 
-if [ -n "$CONDA_ENV_NAME" ]; then
-    PYTHONUNBUFFERED=1 conda run --no-capture-output -n "$CONDA_ENV_NAME" python "$PROJ_ROOT/data/data_process.py" \
-        --forecast-pattern "$FORECAST_PATTERN" \
-        --reanalysis-pattern "$REANALYSIS_PATTERN" \
-        --output-dir "$OUTPUT_DIR" \
-        "${EXTRA_ARGS[@]}"
+echo "[Data Process] DATA_SOURCE=$DATA_SOURCE"
+
+if [ "$DATA_SOURCE" = "macom" ]; then
+    # MaCOM 模式：swt 文件已经是规则网格，直接 grid-to-grid 插值
+    if [ -n "$CONDA_ENV_NAME" ]; then
+        PYTHONUNBUFFERED=1 conda run --no-capture-output -n "$CONDA_ENV_NAME" python "$PROJ_ROOT/data/data_process_macom.py" \
+            --forecast-pattern "$FORECAST_PATTERN" \
+            --output-dir "$OUTPUT_DIR" \
+            "${EXTRA_ARGS[@]}"
+    else
+        PYTHONUNBUFFERED=1 python "$PROJ_ROOT/data/data_process_macom.py" \
+            --forecast-pattern "$FORECAST_PATTERN" \
+            --output-dir "$OUTPUT_DIR" \
+            "${EXTRA_ARGS[@]}"
+    fi
 else
-    PYTHONUNBUFFERED=1 python "$PROJ_ROOT/data/data_process.py" \
-        --forecast-pattern "$FORECAST_PATTERN" \
-        --reanalysis-pattern "$REANALYSIS_PATTERN" \
-        --output-dir "$OUTPUT_DIR" \
-        "${EXTRA_ARGS[@]}"
+    # FVCOM 模式：原始不规则网格，三角剖分插值
+    if [ -n "$CONDA_ENV_NAME" ]; then
+        PYTHONUNBUFFERED=1 conda run --no-capture-output -n "$CONDA_ENV_NAME" python "$PROJ_ROOT/data/data_process.py" \
+            --forecast-pattern "$FORECAST_PATTERN" \
+            --reanalysis-pattern "$REANALYSIS_PATTERN" \
+            --output-dir "$OUTPUT_DIR" \
+            "${EXTRA_ARGS[@]}"
+    else
+        PYTHONUNBUFFERED=1 python "$PROJ_ROOT/data/data_process.py" \
+            --forecast-pattern "$FORECAST_PATTERN" \
+            --reanalysis-pattern "$REANALYSIS_PATTERN" \
+            --output-dir "$OUTPUT_DIR" \
+            "${EXTRA_ARGS[@]}"
+    fi
 fi
