@@ -236,8 +236,8 @@ def main():
     parser.add_argument("--start-date", default=None, help="Inclusive start datetime")
     parser.add_argument("--end-date", default=None, help="Inclusive end datetime")
 
-    parser.add_argument("--fixed-steps", type=int, default=120,
-                        help="Fixed steps for forecast stack (default: 120)")
+    parser.add_argument("--fixed-steps", type=int, default=168,
+                        help="Fixed steps for forecast stack (default: 168 for MaCOM)")
     # 目标网格参数——与 data_process.py 默认值保持一致
     parser.add_argument("--target-h", type=int, default=608)
     parser.add_argument("--target-w", type=int, default=704)

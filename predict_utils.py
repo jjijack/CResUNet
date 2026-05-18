@@ -98,6 +98,8 @@ def predict_all_runs_to_nc(
     if ignore_steps is None:
         ignore_steps = model_params['CResU_Net']['trainer']['loss_weights'].get('ignore_steps', 0)
 
+    MODEL_STEPS = 120  # 模型固定输入输出 120 步
+
     with NCDataset(forecast_path, 'r') as src, NCDataset(output_nc, 'w', format='NETCDF4') as dst:
         selected_run_idx = select_run_indices_by_date(src, start_date=start_date, end_date=end_date)
         if selected_run_idx.size == 0:
@@ -148,29 +150,88 @@ def predict_all_runs_to_nc(
                 v_dst.calendar = v_src.calendar
             v_dst[:] = v_src[selected_run_idx, :]
 
+        # 判断是否需要滑窗
+        need_sliding = step_count > MODEL_STEPS
+        if need_sliding:
+            # 滑窗步长：保证最后一个窗口刚好覆盖末尾
+            # step_count = MODEL_STEPS + (n_windows - 1) * stride
+            # => stride = ceil((step_count - MODEL_STEPS) / (n_windows - 1))
+            # 简化：用 48 步 stride（168 - 120 = 48），重叠 72 步
+            stride = step_count - MODEL_STEPS  # 48 for 168
+            n_windows = (step_count - MODEL_STEPS) // stride + 1  # 2 for 168
+            print(f"Sliding window mode: step_count={step_count}, model_steps={MODEL_STEPS}, "
+                  f"stride={stride}, windows={n_windows}")
+        else:
+            n_windows = 1
+            stride = 0
+
         total_batches = (run_count + batch_size - 1) // batch_size
-        for start in tqdm(range(0, run_count, batch_size), total=total_batches, desc="Predicting batches"):
-            end = min(start + batch_size, run_count)
-            batch_run_idx = selected_run_idx[start:end]
+        for batch_start in tqdm(range(0, run_count, batch_size), total=total_batches, desc="Predicting batches"):
+            batch_end = min(batch_start + batch_size, run_count)
+            batch_run_idx = selected_run_idx[batch_start:batch_end]
+            bs = batch_end - batch_start
             fc_batch = src.variables['sst'][batch_run_idx, :, :, :]
             fc_batch = np.nan_to_num(fc_batch, nan=0.0)
 
-            mask_channel = np.broadcast_to(land_mask, (end - start, 1, lat_count, lon_count))
-            x = np.concatenate((fc_batch, mask_channel), axis=1)
-            x_tensor = torch.from_numpy(x).float().to(device)
+            mask_channel = np.broadcast_to(land_mask, (bs, 1, lat_count, lon_count))
 
-            with torch.no_grad():
-                pred_bias = model(x_tensor)
+            if not need_sliding:
+                # 原有逻辑：step_count <= 120
+                x = np.concatenate((fc_batch, mask_channel), axis=1)
+                x_tensor = torch.from_numpy(x).float().to(device)
 
-            if ignore_steps and ignore_steps > 0:
-                pred_bias[:, :min(ignore_steps, step_count)] = 0.0
+                with torch.no_grad():
+                    pred_bias = model(x_tensor)
 
-            corrected = (x_tensor[:, :step_count] - pred_bias).cpu().numpy().astype(np.float32)
-            pred_bias_np = pred_bias.cpu().numpy().astype(np.float32)
+                if ignore_steps and ignore_steps > 0:
+                    pred_bias[:, :min(ignore_steps, step_count)] = 0.0
 
-            corrected_var[start:end, :, :, :] = corrected
-            if bias_var is not None:
-                bias_var[start:end, :, :, :] = pred_bias_np
+                corrected = (x_tensor[:, :step_count] - pred_bias).cpu().numpy().astype(np.float32)
+                pred_bias_np = pred_bias.cpu().numpy().astype(np.float32)
+
+                corrected_var[batch_start:batch_end, :, :, :] = corrected
+                if bias_var is not None:
+                    bias_var[batch_start:batch_end, :, :, :] = pred_bias_np
+            else:
+                # 滑窗推理 + 重叠区加权平均
+                sum_corrected = np.zeros((bs, step_count, lat_count, lon_count), dtype=np.float64)
+                sum_bias = np.zeros((bs, step_count, lat_count, lon_count), dtype=np.float64)
+                weight = np.zeros((bs, step_count, 1, 1), dtype=np.float64)
+
+                for w in range(n_windows):
+                    s = w * stride
+                    e = s + MODEL_STEPS
+                    window_fc = fc_batch[:, s:e, :, :]
+                    window_mask = np.broadcast_to(land_mask, (bs, 1, lat_count, lon_count))
+                    x = np.concatenate((window_fc, window_mask), axis=1)
+                    x_tensor = torch.from_numpy(x).float().to(device)
+
+                    with torch.no_grad():
+                        pred_bias = model(x_tensor)
+
+                    if ignore_steps and ignore_steps > 0:
+                        ignore_end = min(ignore_steps, MODEL_STEPS)
+                        pred_bias[:, :ignore_end] = 0.0
+
+                    window_corrected = (x_tensor[:, :MODEL_STEPS] - pred_bias).cpu().numpy().astype(np.float64)
+                    window_bias = pred_bias.cpu().numpy().astype(np.float64)
+
+                    # 三角形权重：中间高、两边低，重叠区取加权平均
+                    tri_w = np.minimum(
+                        np.arange(MODEL_STEPS) + 1,
+                        np.arange(MODEL_STEPS)[::-1] + 1
+                    ).reshape(1, MODEL_STEPS, 1, 1).astype(np.float64)
+
+                    sum_corrected[:, s:e] += window_corrected * tri_w
+                    sum_bias[:, s:e] += window_bias * tri_w
+                    weight[:, s:e] += tri_w
+
+                corrected_final = (sum_corrected / weight).astype(np.float32)
+                bias_final = (sum_bias / weight).astype(np.float32)
+
+                corrected_var[batch_start:batch_end, :, :, :] = corrected_final
+                if bias_var is not None:
+                    bias_var[batch_start:batch_end, :, :, :] = bias_final
 
     print(f"Saved corrected NC to: {output_nc}")
 
