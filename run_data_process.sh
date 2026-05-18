@@ -25,7 +25,7 @@ SAVE_REANALYSIS=${SAVE_REANALYSIS:-0}
 
 # 日期筛选（可空，为空表示全量）
 START_DATE=${START_DATE:-""}   # 例如: 2023-01-01 或 20230101
-END_DATE=${END_DATE:-""}       # 例如: 2023-03-31 或 20230331
+END_DATE=${END_DATE:-""}       # 例如: 2023-04-01 或 20230401 (含起始，不含结束)
 # ============================================
 
 mkdir -p "$OUTPUT_DIR"
