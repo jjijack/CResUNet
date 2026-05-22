@@ -244,8 +244,9 @@ def _load_land_mask(forecast_path):
 
 def correct_run_from_nc(model_path, forecast_path, run_idx=0, device=None, ignore_steps=None):
     """
-    读取某一天的 120 小时预报，输出订正后的 120 小时结果。
-    返回: corrected_sst, pred_bias
+    读取某天的预报，输出订正后的结果。
+    支持 step > 120 的滑窗推理。
+    返回: corrected_sst, pred_bias (shape: [step, lat, lon])
     """
     if device is None:
         device = torch.device(experiment_params['device'] if torch.cuda.is_available() else 'cpu')
@@ -256,25 +257,70 @@ def correct_run_from_nc(model_path, forecast_path, run_idx=0, device=None, ignor
     model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.eval()
 
+    MODEL_STEPS = 120
+
     land_mask = _load_land_mask(forecast_path)
     with NCDataset(forecast_path, 'r') as ds:
         sst_raw = ds.variables['sst'][run_idx]
     sst_input = np.nan_to_num(sst_raw, nan=0.0)
-
-    x = np.concatenate((sst_input, land_mask), axis=0)
-    x_tensor = torch.from_numpy(x).unsqueeze(0).float().to(device)
-
-    with torch.no_grad():
-        pred_bias = model(x_tensor)
+    step_count = sst_input.shape[0]
 
     if ignore_steps is None:
         ignore_steps = model_params['CResU_Net']['trainer']['loss_weights'].get('ignore_steps', 0)
-    if ignore_steps and ignore_steps > 0:
-        ignore_steps = min(ignore_steps, pred_bias.shape[1])
-        pred_bias[:, :ignore_steps] = 0.0
 
-    corrected = x_tensor[0, :120] - pred_bias[0]
-    return corrected.cpu().numpy(), pred_bias[0].cpu().numpy()
+    if step_count <= MODEL_STEPS:
+        # 原有逻辑
+        x = np.concatenate((sst_input, land_mask), axis=0)
+        x_tensor = torch.from_numpy(x).unsqueeze(0).float().to(device)
+
+        with torch.no_grad():
+            pred_bias = model(x_tensor)
+
+        if ignore_steps and ignore_steps > 0:
+            ignore_steps_c = min(ignore_steps, pred_bias.shape[1])
+            pred_bias[:, :ignore_steps_c] = 0.0
+
+        corrected = x_tensor[0, :step_count] - pred_bias[0]
+        return corrected.cpu().numpy(), pred_bias[0].cpu().numpy()
+    else:
+        # 滑窗推理
+        lat_h, lon_w = sst_input.shape[1], sst_input.shape[2]
+        stride = step_count - MODEL_STEPS
+        n_windows = (step_count - MODEL_STEPS) // stride + 1
+
+        sum_corrected = np.zeros((step_count, lat_h, lon_w), dtype=np.float64)
+        sum_bias = np.zeros((step_count, lat_h, lon_w), dtype=np.float64)
+        weight = np.zeros((step_count, 1, 1), dtype=np.float64)
+
+        for w in range(n_windows):
+            s = w * stride
+            e = s + MODEL_STEPS
+            window_sst = sst_input[s:e]
+            x = np.concatenate((window_sst, land_mask), axis=0)
+            x_tensor = torch.from_numpy(x).unsqueeze(0).float().to(device)
+
+            with torch.no_grad():
+                pred_bias = model(x_tensor)
+
+            if ignore_steps and ignore_steps > 0:
+                ignore_end = min(ignore_steps, MODEL_STEPS)
+                pred_bias[:, :ignore_end] = 0.0
+
+            window_corrected = (x_tensor[0, :MODEL_STEPS] - pred_bias[0]).cpu().numpy().astype(np.float64)
+            window_bias = pred_bias[0].cpu().numpy().astype(np.float64)
+
+            tri_w = np.minimum(
+                np.arange(MODEL_STEPS) + 1,
+                np.arange(MODEL_STEPS)[::-1] + 1
+            ).reshape(MODEL_STEPS, 1, 1).astype(np.float64)
+
+            sum_corrected[s:e] += window_corrected * tri_w
+            sum_bias[s:e] += window_bias * tri_w
+            weight[s:e] += tri_w
+
+        corrected_final = (sum_corrected / weight).astype(np.float32)
+        bias_final = (sum_bias / weight).astype(np.float32)
+        return corrected_final, bias_final
 
 
 def visualize_run_step(
