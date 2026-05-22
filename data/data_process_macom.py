@@ -6,82 +6,27 @@ MaCOM 数据处理脚本
 
 import argparse
 import os
-import re
-from datetime import datetime
 
 import numpy as np
-from netCDF4 import Dataset as NCDataset, date2num
 from tqdm import tqdm
-
-# 与 data_process_utils.py 保持一致
-TIME_UNITS = "hours since 1970-01-01 00:00:00"
-
-
-# ===================== 工具函数 =====================
-
-def parse_datetime_input(value):
-    if value is None or value == "":
-        return None
-    candidates = [
-        "%Y-%m-%d", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
-        "%Y%m%d", "%Y%m%d%H", "%Y%m%d%H%M", "%Y%m%d%H%M%S",
-    ]
-    for fmt in candidates:
-        try:
-            return datetime.strptime(value, fmt)
-        except ValueError:
-            continue
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError(f"Invalid datetime: {value}") from exc
+from data_process_utils import (
+    init_forecast_nc,
+    init_reanalysis_nc,
+    list_files_with_date_filter,
+    parse_datetime_input,
+    write_forecast_run,
+    write_reanalysis_block,
+)
+from netCDF4 import Dataset as NCDataset, num2date
 
 
-def _extract_datetime_from_filename(file_path):
-    """从文件名中提取日期时间，如 MaCOM_swt_SH_001h_20260404_168.nc -> 20260404"""
-    basename = os.path.basename(file_path)
-    candidates = re.findall(r"\d{8,14}", basename)
-    if not candidates:
-        return None
-    token = max(candidates, key=len)
-    for fmt in ("%Y%m%d%H%M%S", "%Y%m%d%H%M", "%Y%m%d%H", "%Y%m%d"):
-        try:
-            if len(token) == len(datetime.now().strftime(fmt)):
-                return datetime.strptime(token, fmt)
-        except ValueError:
-            continue
-    token = token[:8]
-    try:
-        return datetime.strptime(token, "%Y%m%d")
-    except ValueError:
-        return None
-
-
-def list_files_with_date_filter(pattern, start_date=None, end_date=None):
-    import glob
-    all_files = sorted(glob.glob(pattern))
-    if start_date is None and end_date is None:
-        return all_files
-    selected = []
-    for file_path in all_files:
-        dt = _extract_datetime_from_filename(file_path)
-        if dt is None:
-            continue
-        if start_date is not None and dt < start_date:
-            continue
-        if end_date is not None and dt > end_date:
-            continue
-        selected.append(file_path)
-    return selected
-
+# ===================== 读取 MaCOM 数据 =====================
 
 def read_macom_swt(nc_file):
-    """读取 MaCOM swt 文件，返回 (sst_data, time_objs)
+    """读取 MaCOM swt 或 reanalysis 文件，返回 (sst_data, time_objs, src_lon, src_lat)
     sst_data: (n_time, lat, lon) float32, 单位 Celsius
     time_objs: list of datetime
     """
-    from netCDF4 import num2date
-
     with NCDataset(nc_file, "r") as ds:
         # MaCOM swt 文件变量名为 "t"，维度为 (time, z, lat, lon)
         var = ds.variables["t"]
@@ -179,48 +124,70 @@ def batch_bilinear_interp(src_data, i0, j0, w_lat, w_lon):
     return result.astype(np.float32)
 
 
-def init_forecast_nc(filename, tgt_lat, tgt_lon, fixed_steps):
-    """创建输出 NetCDF，格式与 data_process_utils.init_forecast_nc 完全一致"""
-    nc = NCDataset(filename, "w", format="NETCDF4")
-    nc.createDimension("run", None)
-    nc.createDimension("step", fixed_steps)
-    nc.createDimension("lat", len(tgt_lat))
-    nc.createDimension("lon", len(tgt_lon))
+def process_macom_source(
+    source_name,
+    pattern,
+    mode,
+    output_path,
+    tgt_lat,
+    tgt_lon,
+    fixed_steps,
+    start_date,
+    end_date,
+):
+    """处理 MaCOM 数据源（forecast 或 reanalysis），插值到目标网格并输出 structured nc。
+    mode: "stack" (forecast, run+step) 或 "concat" (reanalysis, 拼接时间序列)
+    """
+    files = list_files_with_date_filter(pattern, start_date=start_date, end_date=end_date)
+    if not files:
+        print(f"[Skip] {source_name}: no matched MaCOM files")
+        return
 
-    nc.createVariable("lat", "f4", ("lat",))[:] = tgt_lat
-    nc.createVariable("lon", "f4", ("lon",))[:] = tgt_lon
-    # MaCOM 无 land_mask，所有点标记为有效（因为后续 predict 会用 mask 通道，设为 0 即全海洋）
-    nc.createVariable("land_mask", "i1", ("lat", "lon"), zlib=True)[:] = 0
+    print(f"源网格读取中...")
+    _, _, src_lon, src_lat = read_macom_swt(files[0])
+    print(f"源网格: {len(src_lat)}x{len(src_lon)}, "
+          f"lat=[{src_lat[0]:.4f},{src_lat[-1]:.4f}], lon=[{src_lon[0]:.4f},{src_lon[-1]:.4f}]")
 
-    sst = nc.createVariable("sst", "f4", ("run", "step", "lat", "lon"), zlib=True, fill_value=np.nan)
-    sst.description = "SST Forecast (Stacked by Run) - MaCOM"
+    print("预计算插值索引...")
+    i0, j0, w_lat, w_lon = build_interp_indices(src_lat, src_lon, tgt_lat, tgt_lon)
 
-    v_start = nc.createVariable("start_time", "f8", ("run",))
-    v_start.units = TIME_UNITS
-    v_start.calendar = "standard"
+    # 从第一个文件推导 land_mask（NaN=陆地，有效=海洋）
+    sst_first, _, _, _ = read_macom_swt(files[0])
+    interp_first = batch_bilinear_interp(sst_first[:1], i0, j0, w_lat, w_lon)
+    land_mask = (~np.isnan(interp_first[0])).astype(np.int8)
+    print(f"Land mask: {land_mask.sum()} ocean / {land_mask.size} total ({land_mask.sum()/land_mask.size:.1%})")
 
-    v_valid = nc.createVariable("valid_time", "f8", ("run", "step"))
-    v_valid.units = TIME_UNITS
-    v_valid.calendar = "standard"
+    if mode == "stack":
+        nc_out = init_forecast_nc(output_path, tgt_lat, tgt_lon, land_mask, fixed_steps)
+    else:
+        nc_out = init_reanalysis_nc(output_path, tgt_lat, tgt_lon, land_mask)
 
-    return nc
-
-
-def write_forecast_run(nc, run_idx, block_data, block_times, fixed_steps):
-    """写入一个 run 的数据，与 data_process_utils.write_forecast_run 完全一致"""
-    final_data = np.full((fixed_steps, block_data.shape[1], block_data.shape[2]), np.nan, dtype=np.float32)
-    final_times = [block_times[0]] * fixed_steps
-
-    use_len = min(block_data.shape[0], fixed_steps)
-    final_data[:use_len] = block_data[:use_len]
-    final_times[:use_len] = block_times[:use_len]
-
-    nc.variables["sst"][run_idx, :, :, :] = final_data
-
-    units = nc.variables["start_time"].units
-    calendar = getattr(nc.variables["start_time"], "calendar", "standard")
-    nc.variables["start_time"][run_idx] = date2num(final_times[0], units=units, calendar=calendar)
-    nc.variables["valid_time"][run_idx, :] = date2num(final_times, units=units, calendar=calendar)
+    try:
+        if mode == "stack":
+            run_idx = 0
+            for nc_file in tqdm(files, desc=f"Processing {source_name}"):
+                try:
+                    sst_data, time_objs, _, _ = read_macom_swt(nc_file)
+                except Exception as e:
+                    print(f"Error reading {os.path.basename(nc_file)}: {e}")
+                    continue
+                interp_data = batch_bilinear_interp(sst_data, i0, j0, w_lat, w_lon)
+                write_forecast_run(nc_out, run_idx, interp_data, list(time_objs), fixed_steps)
+                run_idx += 1
+            print(f"✅ {source_name} 处理完成! {run_idx} 个 runs 已写入: {output_path}")
+        else:
+            curr_idx = 0
+            for nc_file in tqdm(files, desc=f"Processing {source_name}"):
+                try:
+                    sst_data, time_objs, _, _ = read_macom_swt(nc_file)
+                except Exception as e:
+                    print(f"Error reading {os.path.basename(nc_file)}: {e}")
+                    continue
+                interp_data = batch_bilinear_interp(sst_data, i0, j0, w_lat, w_lon)
+                curr_idx += write_reanalysis_block(nc_out, curr_idx, interp_data, list(time_objs))
+            print(f"✅ {source_name} 处理完成! {curr_idx} 个时步已写入: {output_path}")
+    finally:
+        nc_out.close()
 
 
 # ===================== 主流程 =====================
@@ -231,10 +198,17 @@ def main():
     )
     parser.add_argument("--forecast-pattern", required=True,
                         help="Glob pattern for MaCOM swt files, e.g. /path/to/*_001h_*.nc")
+    parser.add_argument("--reanalysis-pattern", default=None,
+                        help="Glob pattern for MaCOM reanalysis files (optional)")
     parser.add_argument("--output-dir", required=True, help="Output directory")
 
     parser.add_argument("--start-date", default=None, help="Inclusive start datetime")
     parser.add_argument("--end-date", default=None, help="Inclusive end datetime")
+
+    parser.add_argument("--save-forecast", action="store_true", default=True,
+                        help="Generate forecast_structured.nc")
+    parser.add_argument("--save-reanalysis", action="store_true",
+                        help="Generate reanalysis_structured.nc")
 
     parser.add_argument("--fixed-steps", type=int, default=168,
                         help="Fixed steps for forecast stack (default: 168 for MaCOM)")
@@ -258,50 +232,38 @@ def main():
     tgt_lon = np.linspace(args.lon_min, args.lon_max, args.target_w)
     tgt_lat = np.linspace(args.lat_min, args.lat_max, args.target_h)
 
-    # 2. 列出并筛选文件
-    files = list_files_with_date_filter(args.forecast_pattern, start_date=start_date, end_date=end_date)
-    if not files:
-        print("[Skip] No matched MaCOM files")
-        return
+    # --- 处理 forecast ---
+    if args.save_forecast:
+        print("\n=== MaCOM forecast 数据处理 ===")
+        process_macom_source(
+            source_name="forecast",
+            pattern=args.forecast_pattern,
+            mode="stack",
+            output_path=os.path.join(args.output_dir, "forecast_structured.nc"),
+            tgt_lat=tgt_lat,
+            tgt_lon=tgt_lon,
+            fixed_steps=args.fixed_steps,
+            start_date=start_date,
+            end_date=end_date,
+        )
 
-    print(f"\n=== MaCOM 数据处理 ===")
-    print(f"目标网格: {args.target_h}x{args.target_w}, "
-          f"lat=[{args.lat_min},{args.lat_max}], lon=[{args.lon_min},{args.lon_max}]")
-    print(f"文件数: {len(files)}, fixed_steps={args.fixed_steps}")
-    print(f"日期范围: {start_date or 'ALL'} ~ {end_date or 'ALL'}")
-
-    # 3. 读取第一个文件获取源网格坐标（所有文件共享同一网格）
-    _, _, src_lon, src_lat = read_macom_swt(files[0])
-    print(f"源网格: {len(src_lat)}x{len(src_lon)}, "
-          f"lat=[{src_lat[0]:.4f},{src_lat[-1]:.4f}], lon=[{src_lon[0]:.4f},{src_lon[-1]:.4f}]")
-
-    # 4. 预计算插值索引（只算一次，所有文件复用）
-    print("预计算插值索引...")
-    i0, j0, w_lat, w_lon = build_interp_indices(src_lat, src_lon, tgt_lat, tgt_lon)
-
-    # 5. 打开输出文件
-    output_path = os.path.join(args.output_dir, "forecast_structured.nc")
-    nc_out = init_forecast_nc(output_path, tgt_lat, tgt_lon, args.fixed_steps)
-
-    try:
-        run_idx = 0
-        for nc_file in tqdm(files, desc="Processing MaCOM files"):
-            try:
-                sst_data, time_objs, _, _ = read_macom_swt(nc_file)
-            except Exception as e:
-                print(f"Error reading {os.path.basename(nc_file)}: {e}")
-                continue
-
-            # 向量化双线性插值（所有时步一次完成）
-            interp_data = batch_bilinear_interp(sst_data, i0, j0, w_lat, w_lon)
-
-            # 写入为一个 run（每个 MaCOM 文件 = 一个 run）
-            write_forecast_run(nc_out, run_idx, interp_data, list(time_objs), args.fixed_steps)
-            run_idx += 1
-
-        print(f"✅ 处理完成! {run_idx} 个 runs 已写入: {output_path}")
-    finally:
-        nc_out.close()
+    # --- 处理 reanalysis ---
+    if args.save_reanalysis:
+        if not args.reanalysis_pattern:
+            print("[Skip] --save-reanalysis requires --reanalysis-pattern")
+        else:
+            print("\n=== MaCOM reanalysis 数据处理 ===")
+            process_macom_source(
+                source_name="reanalysis",
+                pattern=args.reanalysis_pattern,
+                mode="concat",
+                output_path=os.path.join(args.output_dir, "reanalysis_structured.nc"),
+                tgt_lat=tgt_lat,
+                tgt_lon=tgt_lon,
+                fixed_steps=args.fixed_steps,
+                start_date=start_date,
+                end_date=end_date,
+            )
 
 
 if __name__ == "__main__":

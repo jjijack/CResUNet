@@ -75,7 +75,7 @@ def list_files_with_date_filter(pattern, start_date=None, end_date=None):
             continue
         if start_date is not None and dt < start_date:
             continue
-        if end_date is not None and dt > end_date:
+        if end_date is not None and dt >= end_date:
             continue
         selected.append(file_path)
     return selected
@@ -145,11 +145,16 @@ def init_forecast_nc(filename, mesh_lat, mesh_lon, mask, fixed_steps):
     nc = NCDataset(filename, "w", format="NETCDF4")
     nc.createDimension("run", None)
     nc.createDimension("step", fixed_steps)
-    nc.createDimension("lat", mesh_lat.shape[0])
-    nc.createDimension("lon", mesh_lon.shape[1])
+    # 支持 1D（MaCOM）和 2D（FVCOM meshgrid）两种 lat/lon
+    if mesh_lat.ndim == 1:
+        lat_1d, lon_1d = mesh_lat, mesh_lon
+    else:
+        lat_1d, lon_1d = mesh_lat[:, 0], mesh_lon[0, :]
+    nc.createDimension("lat", len(lat_1d))
+    nc.createDimension("lon", len(lon_1d))
 
-    nc.createVariable("lat", "f4", ("lat",))[:] = mesh_lat[:, 0]
-    nc.createVariable("lon", "f4", ("lon",))[:] = mesh_lon[0, :]
+    nc.createVariable("lat", "f4", ("lat",))[:] = lat_1d
+    nc.createVariable("lon", "f4", ("lon",))[:] = lon_1d
     nc.createVariable("land_mask", "i1", ("lat", "lon"), zlib=True)[:] = mask
 
     sst = nc.createVariable("sst", "f4", ("run", "step", "lat", "lon"), zlib=True, fill_value=np.nan)

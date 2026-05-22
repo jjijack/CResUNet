@@ -16,6 +16,7 @@ CONDA_ENV_NAME=torch
 DATA_SOURCE=macom
 SOURCE_ROOT="/home/user3/scratch/SST Correction/CURRENT_MACOM_SH"
 FORECAST_PATTERN="$SOURCE_ROOT/*/*_swt_SH_001h_*.nc"
+REANALYSIS_PATTERN="/home/user3/scratch/SST Correction/Getea/sst_reanalysis/*.nc"
 
 OUTPUT_DIR="$PROJ_ROOT/data"
 

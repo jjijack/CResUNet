@@ -16,6 +16,7 @@ CONDA_ENV_NAME=${CONDA_ENV_NAME:-torch}   # 设为空字符串则使用当前 py
 DATA_SOURCE=${DATA_SOURCE:-macom}
 SOURCE_ROOT=${SOURCE_ROOT:-"/home/user3/scratch/SST Correction/CURRENT_MACOM_SH"}
 FORECAST_PATTERN=${FORECAST_PATTERN:-"$SOURCE_ROOT/*/*_swt_SH_001h_*.nc"}
+REANALYSIS_PATTERN=${REANALYSIS_PATTERN:-""}
 
 # 输出目录
 OUTPUT_DIR=${OUTPUT_DIR:-"$PROJ_ROOT/data"}
@@ -45,15 +46,21 @@ echo "[Data Process] DATA_SOURCE=$DATA_SOURCE"
 
 if [ "$DATA_SOURCE" = "macom" ]; then
     # MaCOM 模式：swt 文件已经是规则网格，直接 grid-to-grid 插值
+    MACOM_EXTRA=()
+    if [ -n "$REANALYSIS_PATTERN" ]; then
+        MACOM_EXTRA+=(--reanalysis-pattern "$REANALYSIS_PATTERN")
+    fi
     if [ -n "$CONDA_ENV_NAME" ]; then
         PYTHONUNBUFFERED=1 conda run --no-capture-output -n "$CONDA_ENV_NAME" python "$PROJ_ROOT/data/data_process_macom.py" \
             --forecast-pattern "$FORECAST_PATTERN" \
             --output-dir "$OUTPUT_DIR" \
+            "${MACOM_EXTRA[@]}" \
             "${EXTRA_ARGS[@]}"
     else
         PYTHONUNBUFFERED=1 python "$PROJ_ROOT/data/data_process_macom.py" \
             --forecast-pattern "$FORECAST_PATTERN" \
             --output-dir "$OUTPUT_DIR" \
+            "${MACOM_EXTRA[@]}" \
             "${EXTRA_ARGS[@]}"
     fi
 else
