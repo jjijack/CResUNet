@@ -4,7 +4,6 @@ from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from dataset import NCCorrectionDataset
 from models.baseline.CResU_Net import CRUNet
-from config import experiment_params, data_params, model_params
 from visualize import visualize_prediction
 from train_utils import (
     clear_output_dir,
@@ -14,41 +13,52 @@ from train_utils import (
     smart_background_l1_loss,
 )
 import os
-"""Training entry point."""
+"""FVCOM 训练入口（旧管线：插值到 608×704 网格）。"""
 
 def run():
-    # --- 配置读取 ---
-    exp_cfg = experiment_params
-    data_cfg = data_params
-    model_cfg = model_params['CResU_Net']
-    trainer_cfg = model_cfg['trainer']
+    # --- FVCOM 固定配置（独立于 config.py 的 MaCOM 设定） ---
+    FVCOM_IN_CHANNELS = 121    # 120 SST + 1 land mask
+    FVCOM_OUT_CHANNELS = 120
+    FVCOM_BASE_CHANNELS = 64
+    FVCOM_DROPOUT = 0.0
+    FVCOM_SAVE_DIR = './train_results'
+    FVCOM_FORECAST_PATH = './data/forecast_structured.nc'
+    FVCOM_REANALYSIS_PATH = './data/reanalysis_structured.nc'
+    FVCOM_LR = 1e-3
+    FVCOM_WEIGHT_DECAY = 1e-4
+    FVCOM_BATCH_SIZE = 2
+    FVCOM_NUM_EPOCHS = 500
+    FVCOM_START_W = 1.0
+    FVCOM_END_W = 10.0
+    FVCOM_IGNORE_STEPS = 25
+    FVCOM_IGNORE_WEIGHT = 0.0
+    FVCOM_TV_WEIGHT = 0.01
+    FVCOM_L1_WEIGHT = 0.1
+    FVCOM_EARLY_STOP_TOLERANCE = 20
+    FVCOM_EARLY_STOP_DELTA = 1e-6
+    FVCOM_TRAIN_DAYS = 20
+    FVCOM_VAL_DAYS = 5
+    FVCOM_TEST_DAYS = 5
+    FVCOM_NUM_WORKERS = 4
 
-    if data_cfg.get('mode') == 'macom':
-        raise RuntimeError("macom 新管线请使用 train_macom.py（高分辨率 + 低分辨率监督）。")
-    
-    device = torch.device(exp_cfg['device'] if torch.cuda.is_available() else 'cpu')
-    clear_output_dir(exp_cfg['save_dir'])
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    clear_output_dir(FVCOM_SAVE_DIR)
 
     # --- 数据集初始化 ---
     print("正在加载全量数据集 ...")
     full_dataset = NCCorrectionDataset(
-        data_cfg['forecast_path'], 
-        data_cfg['reanalysis_path'], 
+        FVCOM_FORECAST_PATH,
+        FVCOM_REANALYSIS_PATH,
     )
     
     run_dates = full_dataset.get_run_dates()
 
-    # --- [关键] 按自然月切分 ---
-    split_cfg = data_cfg.get('monthly_split', {})
-    train_days = split_cfg.get('train_days', 20)
-    val_days = split_cfg.get('val_days', 5)
-    test_days = split_cfg.get('test_days', 5)
-
+    # --- 按自然月切分 ---
     train_idx, val_idx, test_idx = create_monthly_split(
         run_dates,
-        train_days=train_days,
-        val_days=val_days,
-        test_days=test_days
+        train_days=FVCOM_TRAIN_DAYS,
+        val_days=FVCOM_VAL_DAYS,
+        test_days=FVCOM_TEST_DAYS
     )
     
     # 创建 Subset (只是索引映射，不耗内存)
@@ -62,8 +72,8 @@ def run():
     print(f"  Test : {len(test_ds)} (最终评估)")
 
     # DataLoader
-    batch_size = model_cfg['batch_gen']['batch_size']
-    num_workers = data_cfg['num_workers']
+    batch_size = FVCOM_BATCH_SIZE
+    num_workers = FVCOM_NUM_WORKERS
     
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, 
                               num_workers=num_workers, pin_memory=True, persistent_workers=True)
@@ -73,10 +83,12 @@ def run():
 
     # --- 模型初始化 ---
     model = CRUNet(
-        in_channels=model_cfg['core']['in_channels'],
-        out_channels=model_cfg['core']['out_channels'],
+        in_channels=FVCOM_IN_CHANNELS,
+        out_channels=FVCOM_OUT_CHANNELS,
         selected_dim=0,
-        device=device
+        device=device,
+        base_channels=FVCOM_BASE_CHANNELS,
+        dropout=FVCOM_DROPOUT,
     ).to(device)
 
     print("模型初始化完成")
@@ -84,33 +96,29 @@ def run():
     # --- 优化器 ---
     optimizer = torch.optim.Adam(
         model.parameters(), 
-        lr=trainer_cfg['learning_rate'],
-        weight_decay=trainer_cfg['weight_decay']
+        lr=FVCOM_LR,
+        weight_decay=FVCOM_WEIGHT_DECAY
     )
     
-    # 推荐使用 Cosine 以跳出局部最优，或者继续用 ReduceLROnPlateau
-    scheduler_cfg = trainer_cfg['lr_scheduler']
     scheduler = ReduceLROnPlateau(
         optimizer,
-        mode=scheduler_cfg['mode'],
-        factor=scheduler_cfg['factor'],
-        patience=scheduler_cfg['patience']
+        mode='min',
+        factor=0.5,
+        patience=5,
     )
     
-    # Loss 权重
-    w_cfg = trainer_cfg['loss_weights']
-    print(f"Loss配置: StartW={w_cfg['start_weight']}, EndW={w_cfg['end_weight']}, "
-          f"TV={w_cfg['tv_weight']}, L1={w_cfg['l1_weight']}")
+    print(f"Loss配置: StartW={FVCOM_START_W}, EndW={FVCOM_END_W}, "
+          f"TV={FVCOM_TV_WEIGHT}, L1={FVCOM_L1_WEIGHT}")
 
     # --- 训练循环 ---
     best_val_loss = float('inf')
     best_epoch = None
     early_stop_cnt = 0
-    save_path = os.path.join(exp_cfg['save_dir'], exp_cfg['model_save_name'])
+    save_path = os.path.join(FVCOM_SAVE_DIR, 'best_model.pth')
     history_train_rmse = []
     history_val_rmse = []
 
-    for epoch in range(1, trainer_cfg['num_epochs'] + 1):
+    for epoch in range(1, FVCOM_NUM_EPOCHS + 1):
         model.train()
         log_meters = {'loss': 0, 'rmse': 0, 'tv': 0, 'l1': 0}
         
@@ -128,19 +136,18 @@ def run():
                 pred_bias,
                 gt_bias,
                 mask,
-                start_w=w_cfg['start_weight'],
-                end_w=w_cfg['end_weight'],
-                ignore_steps=w_cfg.get('ignore_steps', 0),
-                ignore_weight=w_cfg.get('ignore_weight', 0.0),
+                start_w=FVCOM_START_W,
+                end_w=FVCOM_END_W,
+                ignore_steps=FVCOM_IGNORE_STEPS,
+                ignore_weight=FVCOM_IGNORE_WEIGHT,
             )
             
             # 2. TV (Smoothing)
-            tv_loss = total_variation_loss(pred_bias, weight=w_cfg['tv_weight'])
+            tv_loss = total_variation_loss(pred_bias, weight=FVCOM_TV_WEIGHT)
             
             # 3. Smart L1 (Background Suppression)
-            # 只有当真实偏差 < 0.1 时，才惩罚 L1
             l1_loss = smart_background_l1_loss(pred_bias, gt_bias, mask, zero_threshold=0.1)
-            l1_loss = l1_loss * w_cfg['l1_weight']
+            l1_loss = l1_loss * FVCOM_L1_WEIGHT
             
             # Total
             loss = rmse_loss + tv_loss + l1_loss
@@ -172,10 +179,10 @@ def run():
                     pred_bias,
                     gt_bias,
                     mask,
-                    start_w=w_cfg['start_weight'],
-                    end_w=w_cfg['end_weight'],
-                    ignore_steps=w_cfg.get('ignore_steps', 0),
-                    ignore_weight=w_cfg.get('ignore_weight', 0.0),
+                    start_w=FVCOM_START_W,
+                    end_w=FVCOM_END_W,
+                    ignore_steps=FVCOM_IGNORE_STEPS,
+                    ignore_weight=FVCOM_IGNORE_WEIGHT,
                 )
                 val_rmse_total += v_loss.item()
         
@@ -185,7 +192,7 @@ def run():
 
         # --- Log & Schedule ---
         lr = optimizer.param_groups[0]['lr']
-        print(f"Epoch {epoch}/{trainer_cfg['num_epochs']} | "
+        print(f"Epoch {epoch}/{FVCOM_NUM_EPOCHS} | "
               f"Val RMSE: {avg_val_rmse:.5f} | "
               f"Train RMSE: {avg_train['rmse']:.4f} "
               f"(L1: {avg_train['l1']:.4f}, TV: {avg_train['tv']:.4f}) | "
@@ -194,7 +201,7 @@ def run():
         scheduler.step(avg_val_rmse)
         
         # --- Early Stopping & Save ---
-        delta = trainer_cfg['early_stopping'].get('delta', 0.0)
+        delta = FVCOM_EARLY_STOP_DELTA
         improved = avg_val_rmse < (best_val_loss - delta)
         if improved:
             best_val_loss = avg_val_rmse
@@ -204,15 +211,15 @@ def run():
             print(f"--> ✨ 性能提升！模型已保存: {save_path}")
         else:
             early_stop_cnt += 1
-            print(f"--> 💤 性能未提升 ({early_stop_cnt}/{trainer_cfg['early_stopping']['tolerance']})")
+            print(f"--> 💤 性能未提升 ({early_stop_cnt}/{FVCOM_EARLY_STOP_TOLERANCE})")
             
-        if early_stop_cnt >= trainer_cfg['early_stopping']['tolerance']:
+        if early_stop_cnt >= FVCOM_EARLY_STOP_TOLERANCE:
             print(f"🛑 触发早停机制，训练结束。")
             break
             
         # 可视化 (仅在性能提升时)
         if improved:
-            visualize_prediction(model, val_loader, device, epoch, save_dir=exp_cfg['save_dir'])
+            visualize_prediction(model, val_loader, device, epoch, save_dir=FVCOM_SAVE_DIR)
 
     # 训练曲线
     if history_train_rmse and history_val_rmse:
@@ -224,7 +231,7 @@ def run():
         plt.title('Training Curve')
         plt.legend()
         plt.tight_layout()
-        curve_path = os.path.join(exp_cfg['save_dir'], 'loss_curve.png')
+        curve_path = os.path.join(FVCOM_SAVE_DIR, 'loss_curve.png')
         plt.savefig(curve_path)
         plt.close()
         print(f"训练曲线已保存: {curve_path}")
@@ -259,10 +266,10 @@ def run():
                 pred_bias,
                 gt_bias,
                 mask,
-                start_w=w_cfg['start_weight'],
-                end_w=w_cfg['end_weight'],
-                ignore_steps=w_cfg.get('ignore_steps', 0),
-                ignore_weight=w_cfg.get('ignore_weight', 0.0),
+                start_w=FVCOM_START_W,
+                end_w=FVCOM_END_W,
+                ignore_steps=FVCOM_IGNORE_STEPS,
+                ignore_weight=FVCOM_IGNORE_WEIGHT,
             )
             
             # 计算平均绝对误差 (MAE) 看物理量级

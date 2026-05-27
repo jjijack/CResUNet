@@ -44,41 +44,25 @@ fi
 
 echo "[Data Process] DATA_SOURCE=$DATA_SOURCE"
 
-if [ "$DATA_SOURCE" = "macom_compat" ]; then
-    # macom_compat 模式：swt 文件已经是规则网格，直接 grid-to-grid 插值（旧管线）
-    MACOM_EXTRA=()
-    if [ -n "$REANALYSIS_PATTERN" ]; then
-        MACOM_EXTRA+=(--reanalysis-pattern "$REANALYSIS_PATTERN")
-    fi
-    if [ -n "$CONDA_ENV_NAME" ]; then
-        PYTHONUNBUFFERED=1 conda run --no-capture-output -n "$CONDA_ENV_NAME" python "$PROJ_ROOT/data/data_process_macom.py" \
-            --forecast-pattern "$FORECAST_PATTERN" \
-            --output-dir "$OUTPUT_DIR" \
-            "${MACOM_EXTRA[@]}" \
-            "${EXTRA_ARGS[@]}"
-    else
-        PYTHONUNBUFFERED=1 python "$PROJ_ROOT/data/data_process_macom.py" \
-            --forecast-pattern "$FORECAST_PATTERN" \
-            --output-dir "$OUTPUT_DIR" \
-            "${MACOM_EXTRA[@]}" \
-            "${EXTRA_ARGS[@]}"
-    fi
-elif [ "$DATA_SOURCE" = "macom" ]; then
+if [ "$DATA_SOURCE" = "macom" ]; then
     echo "[Data Process] macom 新管线不需要 run_data_process，训练时直接读原始文件。"
     exit 0
-else
+elif [ "$DATA_SOURCE" = "fvcom" ]; then
     # FVCOM 模式：原始不规则网格，三角剖分插值
     if [ -n "$CONDA_ENV_NAME" ]; then
-        PYTHONUNBUFFERED=1 conda run --no-capture-output -n "$CONDA_ENV_NAME" python "$PROJ_ROOT/data/data_process.py" \
+        PYTHONUNBUFFERED=1 conda run --no-capture-output -n "$CONDA_ENV_NAME" python "$PROJ_ROOT/data/data_process_fvcom.py" \
             --forecast-pattern "$FORECAST_PATTERN" \
             --reanalysis-pattern "$REANALYSIS_PATTERN" \
             --output-dir "$OUTPUT_DIR" \
             "${EXTRA_ARGS[@]}"
     else
-        PYTHONUNBUFFERED=1 python "$PROJ_ROOT/data/data_process.py" \
+        PYTHONUNBUFFERED=1 python "$PROJ_ROOT/data/data_process_fvcom.py" \
             --forecast-pattern "$FORECAST_PATTERN" \
             --reanalysis-pattern "$REANALYSIS_PATTERN" \
             --output-dir "$OUTPUT_DIR" \
             "${EXTRA_ARGS[@]}"
     fi
+else
+    echo "[Data Process] 未知 DATA_SOURCE=$DATA_SOURCE，请设为 macom 或 fvcom。"
+    exit 1
 fi

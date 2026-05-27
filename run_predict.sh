@@ -9,8 +9,9 @@ USER_OUT=${USER_OUT:-"$PROJ_ROOT/out"}
 CONDA_ENV_NAME=${CONDA_ENV_NAME:-torch}   # 设为空字符串则使用当前 python
 DATA_SOURCE=${DATA_SOURCE:-""}
 
-MODEL_PATH=${MODEL_PATH:-$PROJ_ROOT/train_results/best_model.pth}
+MODEL_PATH=${MODEL_PATH:-$PROJ_ROOT/train_results_macom/best_model.pth}
 FORECAST_PATH=${FORECAST_PATH:-$PROJ_ROOT/data/forecast_structured.nc}
+FORECAST_PATTERN=${FORECAST_PATTERN:-""}
 DEVICE=${DEVICE:-cuda}
 OUTPUT_NC=${OUTPUT_NC:-$USER_OUT/forecast_corrected_structured.nc}
 SAVE_BIAS=${SAVE_BIAS:-0}  # 是否保存 bias 字段（forecast - corrected）
@@ -32,22 +33,40 @@ if [ -n "$END_DATE" ]; then
 fi
 
 if [ "$DATA_SOURCE" = "macom" ]; then
-    echo "[Predict] macom 新管线尚未实现 predict 脚本，请使用 train_macom.py 训练后再实现专用预测。"
-    exit 0
-fi
-
-if [ -n "${CONDA_ENV_NAME}" ]; then
-    PYTHONUNBUFFERED=1 conda run --no-capture-output -n "$CONDA_ENV_NAME" python "$PROJ_ROOT/predict.py" \
-        --model "$MODEL_PATH" \
-        --forecast "$FORECAST_PATH" \
-        --device "$DEVICE" \
-        --output-nc "$OUTPUT_NC" \
-        "${EXTRA_ARGS[@]}"
+    # MaCOM 新管线：全图推理，输出高分辨率订正 SST
+    if [ -n "${CONDA_ENV_NAME}" ]; then
+        PYTHONUNBUFFERED=1 conda run --no-capture-output -n "$CONDA_ENV_NAME" python "$PROJ_ROOT/predict_macom.py" \
+            --model "$MODEL_PATH" \
+            --forecast-pattern "$FORECAST_PATTERN" \
+            --output-dir "$USER_OUT" \
+            --device "$DEVICE" \
+            "${EXTRA_ARGS[@]}"
+    else
+        PYTHONUNBUFFERED=1 python "$PROJ_ROOT/predict_macom.py" \
+            --model "$MODEL_PATH" \
+            --forecast-pattern "$FORECAST_PATTERN" \
+            --output-dir "$USER_OUT" \
+            --device "$DEVICE" \
+            "${EXTRA_ARGS[@]}"
+    fi
+elif [ "$DATA_SOURCE" = "fvcom" ]; then
+    # FVCOM 旧管线：读 forecast_structured.nc，输出 NetCDF
+    if [ -n "${CONDA_ENV_NAME}" ]; then
+        PYTHONUNBUFFERED=1 conda run --no-capture-output -n "$CONDA_ENV_NAME" python "$PROJ_ROOT/predict_fvcom.py" \
+            --model "$MODEL_PATH" \
+            --forecast "$FORECAST_PATH" \
+            --device "$DEVICE" \
+            --output-nc "$OUTPUT_NC" \
+            "${EXTRA_ARGS[@]}"
+    else
+        PYTHONUNBUFFERED=1 python "$PROJ_ROOT/predict_fvcom.py" \
+            --model "$MODEL_PATH" \
+            --forecast "$FORECAST_PATH" \
+            --device "$DEVICE" \
+            --output-nc "$OUTPUT_NC" \
+            "${EXTRA_ARGS[@]}"
+    fi
 else
-    PYTHONUNBUFFERED=1 python "$PROJ_ROOT/predict.py" \
-        --model "$MODEL_PATH" \
-        --forecast "$FORECAST_PATH" \
-        --device "$DEVICE" \
-        --output-nc "$OUTPUT_NC" \
-        "${EXTRA_ARGS[@]}"
+    echo "[Predict] 未知 DATA_SOURCE=$DATA_SOURCE，请设为 macom 或 fvcom。"
+    exit 1
 fi

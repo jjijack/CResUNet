@@ -19,6 +19,12 @@ def main():
     if start_date and end_date and start_date > end_date:
         raise ValueError("--start-date cannot be later than --end-date")
 
+    # FVCOM 固定架构参数（与 config.py 的 MaCOM 设定解耦）
+    FVCOM_IN_CHANNELS = 121
+    FVCOM_OUT_CHANNELS = 120
+    FVCOM_BASE_CHANNELS = 64
+    FVCOM_DROPOUT = 0.0
+
     predict_all_runs_to_nc(
         model_path=args.model,
         forecast_path=args.forecast,
@@ -28,6 +34,10 @@ def main():
         save_bias=args.save_bias,
         start_date=start_date,
         end_date=end_date,
+        model_in_channels=FVCOM_IN_CHANNELS,
+        model_out_channels=FVCOM_OUT_CHANNELS,
+        model_base_channels=FVCOM_BASE_CHANNELS,
+        model_dropout=FVCOM_DROPOUT,
     )
 
 

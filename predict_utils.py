@@ -10,13 +10,24 @@ from config import experiment_params, model_params
 from models.baseline.CResU_Net import CRUNet
 
 
-def _build_model(device):
+def _build_model(device, in_channels=None, out_channels=None, base_channels=None, dropout=None):
+    """构建 CRUNet 模型。如果提供 override 参数则使用，否则从 config 读取。"""
     model_cfg = model_params['CResU_Net']
+    if in_channels is None:
+        in_channels = model_cfg['core']['in_channels']
+    if out_channels is None:
+        out_channels = model_cfg['core']['out_channels']
+    if base_channels is None:
+        base_channels = model_cfg['core'].get('base_channels', 64)
+    if dropout is None:
+        dropout = model_cfg['core'].get('dropout', 0.0)
     model = CRUNet(
-        in_channels=model_cfg['core']['in_channels'],
-        out_channels=model_cfg['core']['out_channels'],
+        in_channels=in_channels,
+        out_channels=out_channels,
         selected_dim=0,
-        device=device
+        device=device,
+        base_channels=base_channels,
+        dropout=dropout,
     ).to(device)
     return model
 
@@ -85,13 +96,18 @@ def predict_all_runs_to_nc(
     save_bias=False,
     start_date=None,
     end_date=None,
+    model_in_channels=None,
+    model_out_channels=None,
+    model_base_channels=None,
+    model_dropout=None,
 ):
     if device is None:
         device = torch.device(experiment_params['device'] if torch.cuda.is_available() else 'cpu')
     elif not isinstance(device, torch.device):
         device = torch.device(device)
 
-    model = _build_model(device)
+    model = _build_model(device, in_channels=model_in_channels, out_channels=model_out_channels,
+                         base_channels=model_base_channels, dropout=model_dropout)
     model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     model.eval()
 
