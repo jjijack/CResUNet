@@ -8,6 +8,8 @@ config.py: Contains configuration settings.
 
 train.py: Main training script (train/val/test).
 
+train_macom.py: MaCOM 新管线训练入口（高分辨率输入 + GLO12 低分辨率监督）。
+
 train_utils.py: Training utilities (splits, losses, helpers).
 
 predict_utils.py: Inference helpers and visualization/metrics.
@@ -22,19 +24,39 @@ visualize.py: Training-time visualization utilities.
 
 dataset.py: Dataset loading and preprocessing for NetCDF.
 
+dataset_macom.py: MaCOM 全图数据集（完整 1168×1000 网格）。
+
+downsample.py: MaCOM ↔ GLO12 的下采样/上采样与 grid 构建。
+
 models/baseline/CResU_Net.py: Implementation of the CResU-Net model.
 
 data/: NetCDF inputs.
 
+data/glo12_reader.py: GLO12 多文件读取与时间对齐。
+
 results/: Saved models and outputs.
 
-run_predict.sh: Shell wrapper for batch inference (conda env, date-range filtering, optional bias output).
+run_predict.sh: Shell wrapper for batch inference (conda env, date-range filtering, optional bias output)。
 
 run_data_process.sh: Shell wrapper for raw data processing (date-range filtering, optional reanalysis output).
 
-run_all.sh: End-to-end pipeline wrapper (data processing + prediction).
+run_all.sh: End-to-end pipeline wrapper (data processing + prediction)。
 
 ## 流程&模型简介
+
+### MaCOM 新管线
+
+MaCOM 管线利用深度学习模型对高分辨率海洋预报 SST 进行智能订正，使其更接近 GLO12 再分析产品精度。
+
+**数据流**：高分辨率 MaCOM 预报（1168×1000 网格，168 小时预报时效）作为输入，低分辨率 GLO12 再分析（25×26 网格）作为订正目标。模型学习预报与再分析之间的系统性偏差，并在全图尺度上一次完成订正。
+
+**模型架构**：基于 CResU-Net（协同注意力残差 U-Net），输入 171 通道（168 小时 SST 预报 + 陆地掩膜 + 经纬度位置编码），输出 168 通道偏差场。模型在全图尺度上训练与推理，天然具备全局空间上下文感知能力。
+
+**训练**：运行 `train_macom.py`，结果输出至 `train_results_macom/`。损失函数以 RMSE 为主，辅以 TV 平滑约束和 L1 背景抑制，所有计算均在 GLO12 低分辨率网格上通过海洋掩膜归一化完成，有效避免陆地像素污染。
+
+**推理与评估**：使用 `predict_demo_macom.ipynb` 进行单文件全图推理、高/低分辨率对比可视化和全年误差统计。
+
+### 旧管线（macom_compat / fvcom）
 
 1. 使用`data/interpolate.ipynb`将原始FVCOM网格数据插值到约0.01˚x0.01˚的Grid网格。插值过程基于FVCOM局部格点密度智能生成陆地mask。
 

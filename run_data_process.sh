@@ -44,8 +44,8 @@ fi
 
 echo "[Data Process] DATA_SOURCE=$DATA_SOURCE"
 
-if [ "$DATA_SOURCE" = "macom" ]; then
-    # MaCOM 模式：swt 文件已经是规则网格，直接 grid-to-grid 插值
+if [ "$DATA_SOURCE" = "macom_compat" ]; then
+    # macom_compat 模式：swt 文件已经是规则网格，直接 grid-to-grid 插值（旧管线）
     MACOM_EXTRA=()
     if [ -n "$REANALYSIS_PATTERN" ]; then
         MACOM_EXTRA+=(--reanalysis-pattern "$REANALYSIS_PATTERN")
@@ -63,6 +63,9 @@ if [ "$DATA_SOURCE" = "macom" ]; then
             "${MACOM_EXTRA[@]}" \
             "${EXTRA_ARGS[@]}"
     fi
+elif [ "$DATA_SOURCE" = "macom" ]; then
+    echo "[Data Process] macom 新管线不需要 run_data_process，训练时直接读原始文件。"
+    exit 0
 else
     # FVCOM 模式：原始不规则网格，三角剖分插值
     if [ -n "$CONDA_ENV_NAME" ]; then

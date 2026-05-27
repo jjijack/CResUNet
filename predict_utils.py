@@ -562,3 +562,109 @@ def compute_yearly_mae(model_path, forecast_path, reanalysis_path, device=None, 
         mask_initial_steps=True,
     )
     return mae_fc, mae_corr
+
+
+def compute_yearly_error_lowres(
+    model_path,
+    forecast_pattern,
+    glo12_pattern,
+    device=None,
+    batch_size=1,
+    num_workers=0,
+    mask_initial_steps=True,
+    target_steps=168,
+    time_tolerance_hours=0.6,
+    start_date=None,
+    end_date=None,
+):
+    """全图模式：在 GLO12 低分辨率上统计 RMSE/MAE。"""
+    from torch.utils.data import DataLoader
+    from dataset_macom import MaCOMPatchDataset
+    from data.glo12_reader import GLO12Reader
+    from downsample import build_downsample_grid, downsample_to_glo12
+
+    if device is None:
+        device = torch.device(experiment_params['device'] if torch.cuda.is_available() else 'cpu')
+    elif not isinstance(device, torch.device):
+        device = torch.device(device)
+
+    model_cfg = model_params['CResU_Net']
+    model = CRUNet(
+        in_channels=model_cfg['core']['in_channels'],
+        out_channels=model_cfg['core']['out_channels'],
+        selected_dim=0, device=device,
+        base_channels=model_cfg['core'].get('base_channels', 64),
+        dropout=model_cfg['core'].get('dropout', 0.0),
+    ).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    model.eval()
+
+    ignore_steps = model_cfg['trainer']['loss_weights'].get('ignore_steps', 0)
+    glo12 = GLO12Reader(glo12_pattern, tolerance_hours=time_tolerance_hours)
+
+    dataset = MaCOMPatchDataset(
+        forecast_pattern=forecast_pattern,
+        glo12_pattern=glo12_pattern,
+        glo12_reader=glo12,
+        target_steps=target_steps,
+        time_tolerance_hours=time_tolerance_hours,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+    # 全图 downsample grid（共用一个）
+    src_h, src_w_pad = dataset.src_h, dataset.padded_w
+    grid = build_downsample_grid(
+        dataset.src_lat, dataset.src_lon, src_h, src_w_pad,
+        glo12.lat, glo12.lon, len(glo12.lat), len(glo12.lon),
+        y_offset=0, x_offset=0, patch_h=src_h, patch_w=src_w_pad,
+    ).to(device)
+
+    grid_mask = (
+        (grid[0, :, :, 0] >= -1.0) & (grid[0, :, :, 0] <= 1.0) &
+        (grid[0, :, :, 1] >= -1.0) & (grid[0, :, :, 1] <= 1.0)
+    ).float()
+
+    sum_abs_fc, sum_abs_corr = 0.0, 0.0
+    sum_sq_fc, sum_sq_corr = 0.0, 0.0
+    count = 0
+
+    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=num_workers)
+
+    for x, y_lowres, mask_lowres in loader:
+        x = x.to(device); y_lowres = y_lowres.to(device); mask_lowres = mask_lowres.to(device)
+
+        with torch.no_grad():
+            pred_bias = model(x)
+
+        if mask_initial_steps and ignore_steps and ignore_steps > 0:
+            pred_bias[:, :ignore_steps] = 0.0
+
+        corrected = x[:, :168] - pred_bias
+        mask_hr = x[:, 168:169]
+        fc_lr = downsample_to_glo12(x[:, :168], grid, mask=mask_hr)
+        corr_lr = downsample_to_glo12(corrected, grid, mask=mask_hr)
+        m = mask_lowres * grid_mask[None, :, :]
+
+        diff_fc = (fc_lr - y_lowres) * m
+        diff_corr = (corr_lr - y_lowres) * m
+        sum_abs_fc += diff_fc.abs().sum().item()
+        sum_abs_corr += diff_corr.abs().sum().item()
+        sum_sq_fc += (diff_fc ** 2).sum().item()
+        sum_sq_corr += (diff_corr ** 2).sum().item()
+        count += m.sum().item()
+
+    if count == 0:
+        raise ValueError("没有找到可用的时间步用于误差统计")
+
+    mae_fc = sum_abs_fc / count
+    mae_corr = sum_abs_corr / count
+    rmse_fc = np.sqrt(sum_sq_fc / count)
+    rmse_corr = np.sqrt(sum_sq_corr / count)
+
+    print(f"RMSE (Forecast): {rmse_fc:.5f} °C")
+    print(f"MAE  (Forecast): {mae_fc:.5f} °C")
+    print(f"RMSE (Corrected): {rmse_corr:.5f} °C")
+    print(f"MAE  (Corrected): {mae_corr:.5f} °C")
+
+    return (rmse_fc, mae_fc), (rmse_corr, mae_corr)

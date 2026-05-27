@@ -94,6 +94,7 @@ class Residual1(nn.Module):
     def forward(self, x):
         out=self.branch(x)
         out= out+x
+        out= torch.relu(out)
         out= self.final(out)
         return out
 
@@ -224,69 +225,72 @@ class Up(nn.Module):
 
 
 class CRUNet(nn.Module):
-    def __init__(self, selected_dim, in_channels, out_channels, device):
+    def __init__(self, selected_dim, in_channels, out_channels, device,
+                 base_channels=64, dropout=0.0):
         super(CRUNet, self).__init__()
 
         self.n_channels = in_channels
         self.out_channels = out_channels
         self.selected_dim = selected_dim
 
-        self.inc = DepthwiseSeparableConv(in_channels=in_channels, output_channels=64)
+        ch = base_channels  # 64 (default) or 128 (macom)
+
+        self.inc = DepthwiseSeparableConv(in_channels=in_channels, output_channels=ch)
         self.res1= nn.Sequential(
-            Residual1(in_channel=64, out_channel=64,mid_channel=32),
-            DepthwiseSeparableConv(in_channels=64, output_channels=64)
+            Residual1(in_channel=ch, out_channel=ch, mid_channel=ch//2),
+            DepthwiseSeparableConv(in_channels=ch, output_channels=ch)
         )
 
-        self.ca1 = CoordAtt(inp=64, oup=64)
+        self.ca1 = CoordAtt(inp=ch, oup=ch)
 
-        self.down1 = Down(in_channels=64,out_channels=128,kernel_size=3)
-        self.ca2 = CoordAtt(inp=128, oup=128)
+        self.down1 = Down(in_channels=ch, out_channels=ch*2, kernel_size=3)
+        self.ca2 = CoordAtt(inp=ch*2, oup=ch*2)
         self.res2 = nn.Sequential(
-            Residual2(in_channel=128, out_channel=128, mid_channel=64),
-            DepthwiseSeparableConv(in_channels=128, output_channels=128)
+            Residual2(in_channel=ch*2, out_channel=ch*2, mid_channel=ch),
+            DepthwiseSeparableConv(in_channels=ch*2, output_channels=ch*2)
         )
-        self.ca3 = CoordAtt(inp=256, oup=256)
-        self.down2 = Down(in_channels=128, out_channels=256,kernel_size=3)
+        self.ca3 = CoordAtt(inp=ch*4, oup=ch*4)
+        self.down2 = Down(in_channels=ch*2, out_channels=ch*4, kernel_size=3)
         self.res3 = nn.Sequential(
-            Residual3(in_channel=256, out_channel=256, mid_channel=128),
-            DepthwiseSeparableConv(in_channels=256, output_channels=256)
+            Residual3(in_channel=ch*4, out_channel=ch*4, mid_channel=ch*2),
+            DepthwiseSeparableConv(in_channels=ch*4, output_channels=ch*4)
         )
-        self.ca4 = CoordAtt(inp=512, oup=512)
-        self.down3 = Down(in_channels=256, out_channels=512,kernel_size=3)
+        self.ca4 = CoordAtt(inp=ch*8, oup=ch*8)
+        self.down3 = Down(in_channels=ch*4, out_channels=ch*8, kernel_size=3)
 
         self.res4 = nn.Sequential(
-            Residual4(in_channel=512, out_channel=512, mid_channel=256),
-            DepthwiseSeparableConv(in_channels=512, output_channels=512,kernel_size=3)
+            Residual4(in_channel=ch*8, out_channel=ch*8, mid_channel=ch*4),
+            DepthwiseSeparableConv(in_channels=ch*8, output_channels=ch*8, kernel_size=3)
         )
-        self.ca5 = CoordAtt(inp=1024, oup=1024)
-        self.down4 = Down(in_channels=512, out_channels=1024,kernel_size=3)
-        self.up1 = Up(in_channels=1024, out_channels=512,kernel_size=3)
+        self.ca5 = CoordAtt(inp=ch*16, oup=ch*16)
+        self.down4 = Down(in_channels=ch*8, out_channels=ch*16, kernel_size=3)
+        self.up1 = Up(in_channels=ch*16, out_channels=ch*8, kernel_size=3)
         self.res5 = nn.Sequential(
-            DepthwiseSeparableConv(in_channels=1024, output_channels=512,kernel_size=3),
-            Residual4(in_channel=512, out_channel=512, mid_channel=256)
+            DepthwiseSeparableConv(in_channels=ch*16, output_channels=ch*8, kernel_size=3),
+            Residual4(in_channel=ch*8, out_channel=ch*8, mid_channel=ch*4)
         )
-        self.up2 = Up(in_channels=512, out_channels=256,kernel_size=3)
+        self.up2 = Up(in_channels=ch*8, out_channels=ch*4, kernel_size=3)
         self.res6 = nn.Sequential(
-            DepthwiseSeparableConv(in_channels=512, output_channels=256),
-            Residual3(in_channel=256, out_channel=256, mid_channel=128)
+            DepthwiseSeparableConv(in_channels=ch*8, output_channels=ch*4),
+            Residual3(in_channel=ch*4, out_channel=ch*4, mid_channel=ch*2)
         )
-        self.up3 = Up(in_channels=256, out_channels=128,kernel_size=3)
+        self.up3 = Up(in_channels=ch*4, out_channels=ch*2, kernel_size=3)
         self.res7 = nn.Sequential(
-            DepthwiseSeparableConv(in_channels=256, output_channels=128),
-            Residual2(in_channel=128, out_channel=128, mid_channel=64)
+            DepthwiseSeparableConv(in_channels=ch*4, output_channels=ch*2),
+            Residual2(in_channel=ch*2, out_channel=ch*2, mid_channel=ch)
         )
-        self.up4 = Up(in_channels=128, out_channels=64,kernel_size=3)
+        self.up4 = Up(in_channels=ch*2, out_channels=ch, kernel_size=3)
         self.res8 = nn.Sequential(
-            DepthwiseSeparableConv(in_channels=128, output_channels=64),
-            Residual1(in_channel=64, out_channel=64, mid_channel=32)
+            DepthwiseSeparableConv(in_channels=ch*2, output_channels=ch),
+            Residual1(in_channel=ch, out_channel=ch, mid_channel=ch//2)
         )
-        self.out = DepthwiseSeparableConv(in_channels=64, output_channels=out_channels)
+        self.out = DepthwiseSeparableConv(in_channels=ch, output_channels=out_channels)
+
+        # Dropout（仅在 dropout > 0 时启用，旧代码默认 0 不受影响）
+        self.dropout = nn.Dropout2d(dropout) if dropout > 0 else nn.Identity()
         self.is_trainable = True
 
     def forward(self, x, **kwargs):
-
-        # 直接使用完整的输入 x，因为 train.py 里已经配置好了 in_channels=120
-        # x = x[:, :, self.selected_dim]
 
         x1 = self.inc(x)
         x2 = self.res1(x1)
@@ -302,6 +306,7 @@ class CRUNet(nn.Module):
         ca4 = self.ca4(x8)
         x9 = self.down4(x8)
         ca5 = self.ca5(x9)
+        ca5 = self.dropout(ca5)  # Dropout at bottleneck
         x10 = self.up1(ca5, ca4)
         x11 = self.res5(x10)
         x12 = self.up2(x11, ca3)
@@ -312,8 +317,5 @@ class CRUNet(nn.Module):
         x17 = self.res8(x16)
         out = self.out(x17)
 
-        # output = out.unsqueeze(2)
-        output = out
-
-        return output
+        return out
 

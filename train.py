@@ -22,6 +22,9 @@ def run():
     data_cfg = data_params
     model_cfg = model_params['CResU_Net']
     trainer_cfg = model_cfg['trainer']
+
+    if data_cfg.get('mode') == 'macom':
+        raise RuntimeError("macom 新管线请使用 train_macom.py（高分辨率 + 低分辨率监督）。")
     
     device = torch.device(exp_cfg['device'] if torch.cuda.is_available() else 'cpu')
     clear_output_dir(exp_cfg['save_dir'])

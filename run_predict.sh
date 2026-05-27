@@ -7,6 +7,7 @@ PROJ_ROOT=${PROJ_ROOT:-"/home/user3/scratch/SST Correction/CResUNet"}
 USER_IN=${USER_IN:-"$PROJ_ROOT/data"}
 USER_OUT=${USER_OUT:-"$PROJ_ROOT/out"}
 CONDA_ENV_NAME=${CONDA_ENV_NAME:-torch}   # 设为空字符串则使用当前 python
+DATA_SOURCE=${DATA_SOURCE:-""}
 
 MODEL_PATH=${MODEL_PATH:-$PROJ_ROOT/train_results/best_model.pth}
 FORECAST_PATH=${FORECAST_PATH:-$PROJ_ROOT/data/forecast_structured.nc}
@@ -28,6 +29,11 @@ if [ -n "$START_DATE" ]; then
 fi
 if [ -n "$END_DATE" ]; then
     EXTRA_ARGS+=(--end-date "$END_DATE")
+fi
+
+if [ "$DATA_SOURCE" = "macom" ]; then
+    echo "[Predict] macom 新管线尚未实现 predict 脚本，请使用 train_macom.py 训练后再实现专用预测。"
+    exit 0
 fi
 
 if [ -n "${CONDA_ENV_NAME}" ]; then
