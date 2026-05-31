@@ -24,15 +24,19 @@ def _extract_datetime_from_filename(file_path):
     if not candidates:
         return None
     token = max(candidates, key=len)
-    for fmt in ("%Y%m%d%H%M%S", "%Y%m%d%H%M", "%Y%m%d%H", "%Y%m%d"):
-        try:
-            return datetime.strptime(token[:len(datetime.now().strftime(fmt))], fmt)
-        except ValueError:
-            continue
-    try:
-        return datetime.strptime(token[:8], "%Y%m%d")
-    except ValueError:
-        return None
+    fmt_map = {
+        14: "%Y%m%d%H%M%S",
+        12: "%Y%m%d%H%M",
+        10: "%Y%m%d%H",
+        8:  "%Y%m%d",
+    }
+    for length, fmt in fmt_map.items():
+        if len(token) >= length:
+            try:
+                return datetime.strptime(token[:length], fmt)
+            except ValueError:
+                continue
+    return None
 
 
 class MaCOMPatchDataset(Dataset):
